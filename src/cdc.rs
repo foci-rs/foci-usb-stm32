@@ -215,12 +215,9 @@ const UX_SEND_ZLP: u8 = 1 << 3;
 
 // SAFETY: These statics are protected by the EP0 task running in a single
 // RTIC task context. The ISR only sets wake flags.
-static mut USB_XFER_DATA: *const u8 = core::ptr::null();
+static mut USB_XFER_DATA: *mut u8 = core::ptr::null_mut();
 static mut USB_XFER_SIZE: u8 = 0;
 static mut USB_XFER_FLAGS: u8 = 0;
-
-/// Read buffer for EP0 data phase reads (SET_LINE_CODING etc.)
-static mut EP0_READ_BUF: [u8; 64] = [0u8; 64];
 
 /// CDC line coding state
 static mut LINE_CODING: UsbCdcLineCoding = UsbCdcLineCoding {
@@ -246,10 +243,10 @@ fn usb_do_stall() {
 ///
 /// This implements the multi-packet EP0 transfer state machine:
 /// - For SEND: sends data in EP0_SIZE chunks, with optional ZLP
-/// - For READ: reads data in EP0_SIZE chunks, sends status ZLP at end
+/// - For READ: reads data directly into `data` buffer, sends status ZLP
 /// - Saves state and returns if the hardware is busy (-1)
 /// - Stalls on error (-2)
-fn usb_do_xfer(mut data: *const u8, mut size: u8, mut flags: u8) {
+fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
     loop {
         let xs = if size > EP0_SIZE as u8 {
             EP0_SIZE as u8
@@ -257,13 +254,13 @@ fn usb_do_xfer(mut data: *const u8, mut size: u8, mut flags: u8) {
             size
         };
         let ret: i8 = if flags & UX_READ != 0 {
-            // SAFETY: EP0_READ_BUF is only used here, in task context.
-            unsafe {
-                let buf_ptr = &raw mut EP0_READ_BUF;
-                otg::usb_read_ep0(&mut *buf_ptr, xs)
-            }
+            // Read directly into target buffer (matches C usb_do_xfer).
+            // SAFETY: data points to a writable static with at least
+            // `xs` bytes remaining (e.g. LINE_CODING).
+            let buf = unsafe { core::slice::from_raw_parts_mut(data, xs as usize) };
+            otg::usb_read_ep0(buf, xs)
         } else {
-            // SAFETY: data points to a static descriptor or static LINE_CODING.
+            // SAFETY: data points to a static descriptor or is null (ZLP).
             let slice = if xs > 0 {
                 unsafe { core::slice::from_raw_parts(data, xs as usize) }
             } else {
@@ -273,17 +270,16 @@ fn usb_do_xfer(mut data: *const u8, mut size: u8, mut flags: u8) {
         };
 
         if ret == xs as i8 {
-            // Success
+            // Success — advance pointer.
             // SAFETY: pointer arithmetic on valid static data.
             data = unsafe { data.add(xs as usize) };
             size -= xs;
             if size == 0 {
                 // Entire transfer completed successfully
                 if flags & UX_READ != 0 {
-                    // For READ transfers, copy received data to target
-                    // then send status packet (ZLP)
+                    // Send status ZLP
                     flags = UX_SEND;
-                    data = core::ptr::null();
+                    data = core::ptr::null_mut();
                     continue;
                 }
                 if xs as usize == EP0_SIZE && flags & UX_SEND_ZLP != 0 {
@@ -515,7 +511,7 @@ fn usb_req_get_descriptor(req: &UsbCtrlRequest) {
     } else if (size as u16) < req.w_length {
         flags |= UX_SEND_ZLP;
     }
-    usb_do_xfer(desc, size, flags);
+    usb_do_xfer(desc as *mut u8, size, flags);
 }
 
 /// Handle SET_ADDRESS request.
@@ -536,7 +532,36 @@ fn usb_req_set_configuration(req: &UsbCtrlRequest) {
     otg::usb_set_configure();
     notify_bulk_in();
     notify_bulk_out();
-    usb_do_xfer(core::ptr::null(), 0, UX_SEND);
+    usb_do_xfer(core::ptr::null_mut(), 0, UX_SEND);
+}
+
+// Katapult/CanBoot bootloader constants (from Klipper armcm_reset.c).
+const KATAPULT_SIGNATURE: u64 = 0x2174_6f6f_426e_6143; // "CanBoot!"
+const KATAPULT_REQUEST: u64 = 0x5984_E3FA_6CA1_589B; // stay in bootloader
+
+/// Write the Katapult request signature and reset into the bootloader.
+///
+/// Matches Klipper's `canboot_reset(CANBOOT_REQUEST)` in armcm_reset.c.
+/// Verifies the bootloader signature before writing; falls back to a
+/// raw system reset if no valid bootloader is found.
+fn bootloader_request() {
+    // SAFETY: The vector table at 0x08000000 is always readable.
+    // We verify the Katapult signature before writing to RAM.
+    unsafe {
+        let bl_vectors = 0x0800_0000u32 as *const u32;
+        let reset_handler = core::ptr::read_volatile(bl_vectors.add(1));
+        let boot_sig_addr = (reset_handler - 9) as *const u64;
+        let req_sig_addr = core::ptr::read_volatile(bl_vectors) as *mut u64;
+
+        if (boot_sig_addr as usize).is_multiple_of(8)
+            && core::ptr::read_volatile(boot_sig_addr) == KATAPULT_SIGNATURE
+            && (req_sig_addr as usize).is_multiple_of(8)
+        {
+            cortex_m::interrupt::disable();
+            core::ptr::write_volatile(req_sig_addr, KATAPULT_REQUEST);
+        }
+    }
+    cortex_m::peripheral::SCB::sys_reset();
 }
 
 /// Check if the host is requesting a reboot into the bootloader.
@@ -545,8 +570,7 @@ fn check_reboot() {
     // SAFETY: LINE_CODING/LINE_CONTROL_STATE accessed from task context only.
     unsafe {
         if LINE_CODING.dw_dte_rate == 1200 && (LINE_CONTROL_STATE & 0x01) == 0 {
-            // 1200 baud + DTR deasserted = Arduino-style bootloader request
-            cortex_m::peripheral::SCB::sys_reset();
+            bootloader_request();
         }
     }
 }
@@ -562,9 +586,9 @@ fn usb_req_set_line_coding(req: &UsbCtrlRequest) {
         usb_do_stall();
         return;
     }
-    // LINE_CODING is only accessed from task context.
-    let ptr = &raw const LINE_CODING;
-    usb_do_xfer(ptr as *const u8, line_coding_size as u8, UX_READ);
+    // SAFETY: LINE_CODING only accessed from task context.
+    let ptr = &raw mut LINE_CODING;
+    usb_do_xfer(ptr as *mut u8, line_coding_size as u8, UX_READ);
     check_reboot();
 }
 
@@ -579,9 +603,9 @@ fn usb_req_get_line_coding(req: &UsbCtrlRequest) {
         usb_do_stall();
         return;
     }
-    // LINE_CODING is only accessed from task context.
+    // SAFETY: LINE_CODING only accessed from task context.
     let ptr = &raw const LINE_CODING;
-    usb_do_xfer(ptr as *const u8, line_coding_size as u8, UX_SEND);
+    usb_do_xfer(ptr as *mut u8, line_coding_size as u8, UX_SEND);
 }
 
 /// Handle SET_CONTROL_LINE_STATE request.
@@ -594,7 +618,7 @@ fn usb_req_set_line(req: &UsbCtrlRequest) {
     unsafe {
         LINE_CONTROL_STATE = req.w_value as u8;
     }
-    usb_do_xfer(core::ptr::null(), 0, UX_SEND);
+    usb_do_xfer(core::ptr::null_mut(), 0, UX_SEND);
     check_reboot();
 }
 
@@ -725,7 +749,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
     DESCRIPTOR_COUNT = idx;
 
     // Reset transfer state
-    USB_XFER_DATA = core::ptr::null();
+    USB_XFER_DATA = core::ptr::null_mut();
     USB_XFER_SIZE = 0;
     USB_XFER_FLAGS = 0;
     TRANSMIT_POS = 0;
