@@ -536,27 +536,40 @@ fn usb_req_set_configuration(req: &UsbCtrlRequest) {
 }
 
 // Katapult/CanBoot bootloader constants (from Klipper armcm_reset.c).
+const KATAPULT_BOOT_ADDRESS: u32 = 0x0800_0000;
 const KATAPULT_SIGNATURE: u64 = 0x2174_6f6f_426e_6143; // "CanBoot!"
 const KATAPULT_REQUEST: u64 = 0x5984_E3FA_6CA1_589B; // stay in bootloader
+
+/// True if a valid Katapult bootloader was detected at boot.
+/// Set once during `detect_bootloader()`, read by `check_reboot()`.
+static mut HAS_BOOTLOADER: bool = false;
+
+/// Probe for a Katapult bootloader at KATAPULT_BOOT_ADDRESS.
+/// Call once during init, before USB traffic starts.
+fn detect_bootloader() {
+    // SAFETY: The vector table at 0x08000000 is always readable.
+    unsafe {
+        let bl_vectors = KATAPULT_BOOT_ADDRESS as *const u32;
+        let reset_handler = core::ptr::read_volatile(bl_vectors.add(1));
+        let boot_sig_addr = (reset_handler - 9) as *const u64;
+        if (boot_sig_addr as usize).is_multiple_of(8)
+            && core::ptr::read_volatile(boot_sig_addr) == KATAPULT_SIGNATURE
+        {
+            HAS_BOOTLOADER = true;
+        }
+    }
+}
 
 /// Write the Katapult request signature and reset into the bootloader.
 ///
 /// Matches Klipper's `canboot_reset(CANBOOT_REQUEST)` in armcm_reset.c.
-/// Verifies the bootloader signature before writing; falls back to a
-/// raw system reset if no valid bootloader is found.
 fn bootloader_request() {
-    // SAFETY: The vector table at 0x08000000 is always readable.
-    // We verify the Katapult signature before writing to RAM.
+    // SAFETY: The vector table at KATAPULT_BOOT_ADDRESS is readable.
+    // HAS_BOOTLOADER guarantees the signature is valid.
     unsafe {
-        let bl_vectors = 0x0800_0000u32 as *const u32;
-        let reset_handler = core::ptr::read_volatile(bl_vectors.add(1));
-        let boot_sig_addr = (reset_handler - 9) as *const u64;
+        let bl_vectors = KATAPULT_BOOT_ADDRESS as *const u32;
         let req_sig_addr = core::ptr::read_volatile(bl_vectors) as *mut u64;
-
-        if (boot_sig_addr as usize).is_multiple_of(8)
-            && core::ptr::read_volatile(boot_sig_addr) == KATAPULT_SIGNATURE
-            && (req_sig_addr as usize).is_multiple_of(8)
-        {
+        if (req_sig_addr as usize).is_multiple_of(8) {
             cortex_m::interrupt::disable();
             core::ptr::write_volatile(req_sig_addr, KATAPULT_REQUEST);
         }
@@ -565,10 +578,16 @@ fn bootloader_request() {
 }
 
 /// Check if the host is requesting a reboot into the bootloader.
-/// Matches `check_reboot()` in usb_cdc.c.
+/// Matches `check_reboot()` in usb_cdc.c. Only triggers if a valid
+/// Katapult bootloader was detected at boot (mirrors Klipper C's
+/// `CONFIG_HAVE_BOOTLOADER_REQUEST` compile-time guard).
 fn check_reboot() {
-    // SAFETY: LINE_CODING/LINE_CONTROL_STATE accessed from task context only.
+    // SAFETY: LINE_CODING/LINE_CONTROL_STATE/HAS_BOOTLOADER accessed
+    // from task context only.
     unsafe {
+        if !HAS_BOOTLOADER {
+            return;
+        }
         if LINE_CODING.dw_dte_rate == 1200 && (LINE_CONTROL_STATE & 0x01) == 0 {
             bootloader_request();
         }
@@ -675,6 +694,9 @@ fn ep0_task() {
 ///
 /// Must be called exactly once, before any other CDC function.
 pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial: &str) {
+    // Check for Katapult bootloader (must happen before USB traffic).
+    detect_bootloader();
+
     // Build descriptors
     DEVICE_DESC = descriptors::build_device_descriptor(vid, pid);
     CONFIG_DESC = descriptors::build_config_descriptor();
