@@ -44,7 +44,7 @@ pub struct UsbConfig {
     pub base_addr: usize,
     /// IRQ number for the USB OTG interrupt.
     pub irq_num: u16,
-    /// Turnaround time (TRDT field in GUSBCFG). Typically 6 for F4, 5 for H7.
+    /// Turnaround time (TRDT field in GUSBCFG). 6 for both F4 and H7.
     pub trdt: u8,
     /// Use VBUS B-session valid override (true for F446/H7/F7, false for F4).
     pub vbus_detection: bool,
