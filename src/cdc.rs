@@ -15,6 +15,7 @@ use crate::descriptors::{
 };
 use crate::ep::{EP_BULK_IN_SIZE, EP_BULK_OUT_SIZE, EP0_SIZE};
 use crate::otg;
+use crate::sync::RacyCell;
 
 // ----------------------------------------------------------------
 // Wake flags (replace Klipper's sched_wake_task / sched_check_wake)
@@ -61,10 +62,18 @@ fn check_bulk_out_wake() -> bool {
 /// TX buffer size (matches Klipper's 192-byte transmit_buf).
 const TX_BUF_SIZE: usize = 192;
 
-// SAFETY: These statics are protected by usb_irq_disable/enable in the
-// functions that access them, matching Klipper's concurrency model.
-static mut TRANSMIT_BUF: [u8; TX_BUF_SIZE] = [0u8; TX_BUF_SIZE];
-static mut TRANSMIT_POS: u8 = 0;
+/// Bulk IN transmit buffer. `pos` is the current fill level in `buf`.
+struct TxBuffer {
+    buf: [u8; TX_BUF_SIZE],
+    pos: u8,
+}
+
+/// Bulk IN TX state. All accesses occur in the single protocol-task
+/// context; the USB ISR only sets the bulk-in wake flag.
+static TX: RacyCell<TxBuffer> = RacyCell::new(TxBuffer {
+    buf: [0u8; TX_BUF_SIZE],
+    pos: 0,
+});
 
 /// Write data to the USB transmit buffer. This is the primary API for
 /// sending protocol responses over USB.
@@ -76,17 +85,18 @@ static mut TRANSMIT_POS: u8 = 0;
 ///
 /// Must not be called from the USB ISR (reentrant access).
 pub fn tx_write(data: &[u8]) {
-    // SAFETY: Protected by single-threaded RTIC task context.
-    // Only the protocol task calls tx_write, and the ISR only reads
-    // via bulk_in_task which drains the buffer.
+    // SAFETY: `TX` is only touched from the protocol RTIC task context.
+    // The ISR only sets the bulk-in wake flag; it does not read or write
+    // the buffer.
     unsafe {
-        let tpos = TRANSMIT_POS as usize;
+        let tx = &mut *TX.get();
+        let tpos = tx.pos as usize;
         if tpos + data.len() > TX_BUF_SIZE {
-            // Not enough space — drop (matches Klipper's console_sendf)
+            // Not enough space — drop (matches Klipper's console_sendf).
             return;
         }
-        TRANSMIT_BUF[tpos..tpos + data.len()].copy_from_slice(data);
-        TRANSMIT_POS = (tpos + data.len()) as u8;
+        tx.buf[tpos..tpos + data.len()].copy_from_slice(data);
+        tx.pos = (tpos + data.len()) as u8;
     }
     notify_bulk_in();
 }
@@ -96,10 +106,11 @@ fn bulk_in_task() {
     if !check_bulk_in_wake() {
         return;
     }
-    // SAFETY: TRANSMIT_BUF/TRANSMIT_POS accessed from task context only.
-    // The ISR sets the wake flag but does not touch these buffers.
+    // SAFETY: `TX` is only touched from the protocol RTIC task context.
+    // The ISR only sets the bulk-in wake flag.
     unsafe {
-        let tpos = TRANSMIT_POS as usize;
+        let tx = &mut *TX.get();
+        let tpos = tx.pos as usize;
         if tpos == 0 {
             return;
         }
@@ -107,25 +118,24 @@ fn bulk_in_task() {
         if max_tpos > EP_BULK_IN_SIZE {
             max_tpos = EP_BULK_IN_SIZE;
         } else if max_tpos == EP_BULK_IN_SIZE {
-            // Avoid zero-length-packets
+            // Avoid zero-length-packets.
             max_tpos = EP_BULK_IN_SIZE - 1;
         }
-        let ret = otg::usb_send_bulk_in(&TRANSMIT_BUF[..max_tpos]);
+        let ret = otg::usb_send_bulk_in(&tx.buf[..max_tpos]);
         if ret <= 0 {
             return;
         }
         let ret = ret as usize;
         let needcopy = tpos - ret;
         if needcopy > 0 {
-            // Move remaining data to front of buffer
-            // Use copy within slice (memmove equivalent)
+            // Move remaining data to front of buffer (memmove-equivalent).
             let src = ret;
             for i in 0..needcopy {
-                TRANSMIT_BUF[i] = TRANSMIT_BUF[src + i];
+                tx.buf[i] = tx.buf[src + i];
             }
             notify_bulk_in();
         }
-        TRANSMIT_POS = needcopy as u8;
+        tx.pos = needcopy as u8;
     }
 }
 
@@ -136,9 +146,18 @@ fn bulk_in_task() {
 /// RX buffer size (matches Klipper's 128-byte receive_buf).
 const RX_BUF_SIZE: usize = 128;
 
-// SAFETY: These statics are protected by single-threaded RTIC task context.
-static mut RECEIVE_BUF: [u8; RX_BUF_SIZE] = [0u8; RX_BUF_SIZE];
-static mut RECEIVE_POS: u8 = 0;
+/// Bulk OUT receive buffer. `pos` is the current fill level in `buf`.
+struct RxBuffer {
+    buf: [u8; RX_BUF_SIZE],
+    pos: u8,
+}
+
+/// Bulk OUT RX state. All accesses occur in the single protocol-task
+/// context; the USB ISR only sets the bulk-out wake flag.
+static RX: RacyCell<RxBuffer> = RacyCell::new(RxBuffer {
+    buf: [0u8; RX_BUF_SIZE],
+    pos: 0,
+});
 
 /// Get a reference to the received data available for protocol processing.
 ///
@@ -148,9 +167,13 @@ static mut RECEIVE_POS: u8 = 0;
 ///
 /// Must be called from the same RTIC task context that calls `poll()`.
 pub fn rx_data() -> &'static [u8] {
-    // SAFETY: RECEIVE_BUF/RECEIVE_POS only modified by bulk_out_task
-    // which runs in the same task context as the caller.
-    unsafe { &RECEIVE_BUF[..RECEIVE_POS as usize] }
+    // SAFETY: `RX` is only touched from the RTIC protocol task context.
+    // The returned slice remains valid until the caller invokes
+    // `rx_consume`, which can only happen on the same task.
+    unsafe {
+        let rx = &*RX.get();
+        &rx.buf[..rx.pos as usize]
+    }
 }
 
 /// Mark `len` bytes as consumed from the RX buffer. The consumed bytes
@@ -160,19 +183,19 @@ pub fn rx_data() -> &'static [u8] {
 ///
 /// Must be called from the same RTIC task context that calls `poll()`.
 pub fn rx_consume(len: usize) {
-    // SAFETY: RECEIVE_BUF/RECEIVE_POS only modified by bulk_out_task
-    // which runs in the same task context as the caller.
+    // SAFETY: same task-context contract as `rx_data`.
     unsafe {
-        let rpos = RECEIVE_POS as usize;
+        let rx = &mut *RX.get();
+        let rpos = rx.pos as usize;
         if len >= rpos {
-            RECEIVE_POS = 0;
+            rx.pos = 0;
             return;
         }
         let needcopy = rpos - len;
         for i in 0..needcopy {
-            RECEIVE_BUF[i] = RECEIVE_BUF[len + i];
+            rx.buf[i] = rx.buf[len + i];
         }
-        RECEIVE_POS = needcopy as u8;
+        rx.pos = needcopy as u8;
         if needcopy > 0 {
             notify_bulk_out();
         }
@@ -183,23 +206,23 @@ pub fn rx_consume(len: usize) {
 ///
 /// Returns true if receive data is available for protocol processing.
 fn bulk_out_task() -> bool {
+    // SAFETY: `RX` is task-context-owned; the ISR only sets the wake flag.
     if !check_bulk_out_wake() {
-        // SAFETY: RECEIVE_POS only modified in this task context.
-        return unsafe { RECEIVE_POS > 0 };
+        return unsafe { (*RX.get()).pos > 0 };
     }
-    // SAFETY: RECEIVE_BUF/RECEIVE_POS accessed from task context only.
     unsafe {
-        let rpos = RECEIVE_POS as usize;
+        let rx = &mut *RX.get();
+        let rpos = rx.pos as usize;
         if rpos + EP_BULK_OUT_SIZE <= RX_BUF_SIZE {
-            let ret = otg::usb_read_bulk_out(&mut RECEIVE_BUF[rpos..], EP_BULK_OUT_SIZE as u8);
+            let ret = otg::usb_read_bulk_out(&mut rx.buf[rpos..], EP_BULK_OUT_SIZE as u8);
             if ret > 0 {
-                RECEIVE_POS = (rpos + ret as usize) as u8;
+                rx.pos = (rpos + ret as usize) as u8;
                 notify_bulk_out();
             }
         } else {
             notify_bulk_out();
         }
-        RECEIVE_POS > 0
+        rx.pos > 0
     }
 }
 
@@ -778,8 +801,8 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         USB_XFER_DATA = core::ptr::null_mut();
         USB_XFER_SIZE = 0;
         USB_XFER_FLAGS = 0;
-        TRANSMIT_POS = 0;
-        RECEIVE_POS = 0;
+        (*TX.get()).pos = 0;
+        (*RX.get()).pos = 0;
         LINE_CODING = UsbCdcLineCoding::default();
         LINE_CONTROL_STATE = 0;
     }
