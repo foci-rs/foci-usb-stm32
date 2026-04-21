@@ -743,54 +743,57 @@ pub struct OtgConfig {
 /// Must be called exactly once, before any other function in this module.
 /// `config.base_addr` must be the valid base address of an STM32 USB OTG peripheral.
 pub unsafe fn init(config: &OtgConfig) {
-    // Store configuration in statics
-    USB_BASE = config.base_addr;
-    USB_IRQ = config.irq_num;
-    DOUBLE_BUFFER_TX = config.double_buffer_tx;
+    // SAFETY: caller ensures single-call + valid base_addr per function contract.
+    unsafe {
+        // Store configuration in statics
+        USB_BASE = config.base_addr;
+        USB_IRQ = config.irq_num;
+        DOUBLE_BUFFER_TX = config.double_buffer_tx;
 
-    // Wait for AHB idle
-    while readl(reg(GRSTCTL)) & GRSTCTL_AHBIDL == 0 {}
+        // Wait for AHB idle
+        while readl(reg(GRSTCTL)) & GRSTCTL_AHBIDL == 0 {}
 
-    // Configure USB in full-speed device mode
-    writel(
-        reg(GUSBCFG),
-        GUSBCFG_FDMOD | GUSBCFG_PHYSEL | ((config.trdt as u32) << GUSBCFG_TRDT_POS),
-    );
-    let dcfg = readl(reg(DCFG));
-    writel(reg(DCFG), dcfg | (3 << DCFG_DSPD_POS));
+        // Configure USB in full-speed device mode
+        writel(
+            reg(GUSBCFG),
+            GUSBCFG_FDMOD | GUSBCFG_PHYSEL | ((config.trdt as u32) << GUSBCFG_TRDT_POS),
+        );
+        let dcfg = readl(reg(DCFG));
+        writel(reg(DCFG), dcfg | (3 << DCFG_DSPD_POS));
 
-    // VBUS detection
-    if config.vbus_detection {
-        writel(reg(GOTGCTL), GOTGCTL_BVALOEN | GOTGCTL_BVALOVAL);
-    } else {
+        // VBUS detection
+        if config.vbus_detection {
+            writel(reg(GOTGCTL), GOTGCTL_BVALOEN | GOTGCTL_BVALOVAL);
+        } else {
+            let gccfg = readl(reg(GCCFG));
+            writel(reg(GCCFG), gccfg | GCCFG_NOVBUSSENS);
+        }
+
+        // Setup USB packet memory
+        fifo_configure();
+
+        // Configure and enable EP0
+        let mpsize_ep0: u32 = 2; // 16 bytes (encoding: 0=64, 1=32, 2=16, 3=8)
+        writel(reg(diepctl(0)), mpsize_ep0 | DEPCTL_SNAK);
+        writel(
+            reg(doeptsiz(0)),
+            64 | (1 << DOEPTSIZ_STUPCNT_POS) | (1 << DEPTSIZ_PKTCNT_POS),
+        );
+        writel(reg(doepctl(0)), mpsize_ep0 | DEPCTL_EPENA | DEPCTL_SNAK);
+
+        // Enable interrupts
+        writel(reg(DIEPMSK), DIEPMSK_XFRCM);
+        writel(reg(GINTMSK), GINTMSK_RXFLVLM | GINTMSK_IEPINT);
+        writel(reg(GAHBCFG), GAHBCFG_GINT);
+
+        // Enable IRQ in NVIC (caller sets priority via RTIC)
+        cortex_m::peripheral::NVIC::unmask(IrqNr(config.irq_num));
+
+        // Enable USB
         let gccfg = readl(reg(GCCFG));
-        writel(reg(GCCFG), gccfg | GCCFG_NOVBUSSENS);
+        writel(reg(GCCFG), gccfg | GCCFG_PWRDWN);
+        writel(reg(DCTL), 0);
     }
-
-    // Setup USB packet memory
-    fifo_configure();
-
-    // Configure and enable EP0
-    let mpsize_ep0: u32 = 2; // 16 bytes (encoding: 0=64, 1=32, 2=16, 3=8)
-    writel(reg(diepctl(0)), mpsize_ep0 | DEPCTL_SNAK);
-    writel(
-        reg(doeptsiz(0)),
-        64 | (1 << DOEPTSIZ_STUPCNT_POS) | (1 << DEPTSIZ_PKTCNT_POS),
-    );
-    writel(reg(doepctl(0)), mpsize_ep0 | DEPCTL_EPENA | DEPCTL_SNAK);
-
-    // Enable interrupts
-    writel(reg(DIEPMSK), DIEPMSK_XFRCM);
-    writel(reg(GINTMSK), GINTMSK_RXFLVLM | GINTMSK_IEPINT);
-    writel(reg(GAHBCFG), GAHBCFG_GINT);
-
-    // Enable IRQ in NVIC (caller sets priority via RTIC)
-    cortex_m::peripheral::NVIC::unmask(IrqNr(config.irq_num));
-
-    // Enable USB
-    let gccfg = readl(reg(GCCFG));
-    writel(reg(GCCFG), gccfg | GCCFG_PWRDWN);
-    writel(reg(DCTL), 0);
 }
 
 /// Returns the USB peripheral base address.

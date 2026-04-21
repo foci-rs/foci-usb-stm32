@@ -6,7 +6,7 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 use crate::ep::{
-    EP0_SIZE, EP_ACM, EP_ACM_SIZE, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE,
+    EP_ACM, EP_ACM_SIZE, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE, EP0_SIZE,
 };
 
 // USB standard constants
@@ -344,9 +344,13 @@ impl StringDescriptorBuf {
     /// The caller must ensure no mutable reference to this `StringDescriptorBuf`
     /// exists when the returned pointer is dereferenced.
     pub unsafe fn raw_ptr_and_len(this: *const Self) -> (*const u8, u8) {
-        let buf_ptr = core::ptr::addr_of!((*this).buf) as *const u8;
-        let len = core::ptr::addr_of!((*this).len).read();
-        (buf_ptr, len)
+        // SAFETY: caller upholds the safety contract: no live mutable
+        // reference to *this while the returned pointer is used.
+        unsafe {
+            let buf_ptr = core::ptr::addr_of!((*this).buf) as *const u8;
+            let len = core::ptr::addr_of!((*this).len).read();
+            (buf_ptr, len)
+        }
     }
 }
 

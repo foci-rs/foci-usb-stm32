@@ -73,20 +73,23 @@ pub struct UsbConfig {
 /// `config.base_addr` must be the valid base address of an STM32 USB OTG
 /// peripheral.
 pub unsafe fn usb_init(config: &UsbConfig) {
-    otg::init(&otg::OtgConfig {
-        base_addr: config.base_addr,
-        irq_num: config.irq_num,
-        trdt: config.trdt,
-        vbus_detection: config.vbus_detection,
-        double_buffer_tx: config.double_buffer_tx,
-    });
-    cdc::init(
-        config.vid,
-        config.pid,
-        config.manufacturer,
-        config.product,
-        config.serial,
-    );
+    // SAFETY: caller upholds the safety contract of `usb_init`.
+    unsafe {
+        otg::init(&otg::OtgConfig {
+            base_addr: config.base_addr,
+            irq_num: config.irq_num,
+            trdt: config.trdt,
+            vbus_detection: config.vbus_detection,
+            double_buffer_tx: config.double_buffer_tx,
+        });
+        cdc::init(
+            config.vid,
+            config.pid,
+            config.manufacturer,
+            config.product,
+            config.serial,
+        );
+    }
 }
 
 /// USB OTG IRQ handler. Call this from the RTIC interrupt binding.
@@ -134,5 +137,6 @@ pub fn check_wake() -> bool {
 ///
 /// Must be called before the host reads the serial number descriptor.
 pub unsafe fn set_serial_from_chip_id(id: &[u8], strlen: usize) {
-    cdc::set_serial_from_chip_id(id, strlen);
+    // SAFETY: caller upholds the safety contract of `set_serial_from_chip_id`.
+    unsafe { cdc::set_serial_from_chip_id(id, strlen) };
 }
