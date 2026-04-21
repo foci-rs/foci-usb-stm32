@@ -13,6 +13,7 @@
 pub mod cdc;
 pub mod descriptors;
 pub mod otg;
+mod sync;
 
 /// Endpoint constants (from usb_cdc_ep.h)
 pub mod ep {

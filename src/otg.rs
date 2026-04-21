@@ -8,10 +8,11 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 
 use crate::cdc;
 use crate::ep::{EP_ACM, EP_ACM_SIZE, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE};
+use crate::sync::RacyCell;
 
 // ----------------------------------------------------------------
 // OTG register offsets (from STM32 reference manual)
@@ -147,20 +148,31 @@ const TX0FD_POS: u32 = 16;
 // ----------------------------------------------------------------
 
 /// Base address of the USB OTG peripheral. Set once during init.
-static mut USB_BASE: usize = 0;
+static USB_BASE: AtomicUsize = AtomicUsize::new(0);
 
-/// IRQ number for the USB OTG peripheral.
-static mut USB_IRQ: u16 = 0;
+/// IRQ number for the USB OTG peripheral. Set once during init.
+static USB_IRQ: AtomicU16 = AtomicU16::new(0);
 
-/// Whether double-buffer TX is enabled.
-static mut DOUBLE_BUFFER_TX: bool = false;
+/// Whether double-buffer TX is enabled. Set once during init.
+static DOUBLE_BUFFER_TX: AtomicBool = AtomicBool::new(false);
 
 /// Wake flag: set by ISR, polled by RTIC task.
 static WAKE_FLAG: AtomicBool = AtomicBool::new(false);
 
-/// TX double-buffer (matches Klipper's TX_BUF struct)
-static mut TX_BUF_LEN: u32 = 0;
-static mut TX_BUF_DATA: [u32; EP_BULK_IN_SIZE / 4] = [0; EP_BULK_IN_SIZE / 4];
+/// TX double-buffer (matches Klipper's TX_BUF struct).
+#[derive(Clone, Copy)]
+struct TxBuf {
+    len: u32,
+    data: [u32; EP_BULK_IN_SIZE / 4],
+}
+
+/// USB bulk IN double-buffer state. Accessed from task context and ISR;
+/// all accesses are serialized either by `usb_irq_disable`/`_enable` windows
+/// in task code or by the single ISR context owning the handler.
+static TX_BUF: RacyCell<TxBuf> = RacyCell::new(TxBuf {
+    len: 0,
+    data: [0; EP_BULK_IN_SIZE / 4],
+});
 
 // ----------------------------------------------------------------
 // Register access helpers
@@ -182,24 +194,23 @@ fn writel(addr: usize, val: u32) {
 
 #[inline(always)]
 fn reg(offset: usize) -> usize {
-    // SAFETY: USB_BASE is set once during init and never changed.
-    unsafe { USB_BASE + offset }
+    USB_BASE.load(Ordering::Relaxed) + offset
 }
 
 /// Disable the USB interrupt (does not disable all interrupts).
 pub fn usb_irq_disable() {
-    // SAFETY: USB_IRQ is set once during init and never changed.
-    // cortex_m::peripheral::NVIC::mask() is safe to call with any valid IRQ number.
-    unsafe {
-        cortex_m::peripheral::NVIC::mask(IrqNr(USB_IRQ));
-    }
+    // `cortex_m::peripheral::NVIC::mask()` is safe to call with any valid
+    // IRQ number. `USB_IRQ` is set once during init and never changed.
+    cortex_m::peripheral::NVIC::mask(IrqNr(USB_IRQ.load(Ordering::Relaxed)));
 }
 
 /// Enable the USB interrupt.
 pub fn usb_irq_enable() {
-    // SAFETY: USB_IRQ is set once during init and never changed.
+    // SAFETY: enabling an interrupt with a valid IRQ number is sound; this
+    // must still be an `unsafe` call because `NVIC::unmask` can enable
+    // interrupts that break mask-based critical sections elsewhere.
     unsafe {
-        cortex_m::peripheral::NVIC::unmask(IrqNr(USB_IRQ));
+        cortex_m::peripheral::NVIC::unmask(IrqNr(USB_IRQ.load(Ordering::Relaxed)));
     }
 }
 
@@ -439,13 +450,14 @@ pub fn usb_send_bulk_in(data: &[u8]) -> i8 {
         return len as i8;
     }
 
-    // SAFETY: DOUBLE_BUFFER_TX is set once during init and never changed.
-    let double_buf = unsafe { DOUBLE_BUFFER_TX };
-    // SAFETY: TX_BUF_LEN is protected by usb_irq_disable/enable.
-    let dbuf_busy = double_buf && unsafe { TX_BUF_LEN } != 0;
+    let double_buf = DOUBLE_BUFFER_TX.load(Ordering::Relaxed);
+    // SAFETY: TX_BUF is accessed inside a `usb_irq_disable`/_enable window
+    // and the ISR cannot preempt. No other context observes `TX_BUF` here.
+    let dbuf_busy = double_buf && unsafe { (*TX_BUF.get()).len } != 0;
 
     if ctl & DEPCTL_EPENA != 0 || dbuf_busy {
-        if !double_buf || unsafe { TX_BUF_LEN } != 0 || len == 0 {
+        // SAFETY: same access rationale as above for `TX_BUF.len`.
+        if !double_buf || unsafe { (*TX_BUF.get()).len } != 0 || len == 0 {
             // Wait for space to transmit
             let msk = readl(reg(DAINTMSK));
             writel(reg(DAINTMSK), msk | (1 << EP_BULK_IN));
@@ -459,12 +471,14 @@ pub fn usb_send_bulk_in(data: &[u8]) -> i8 {
             len
         };
         let blocks = (len as u32).div_ceil(4) as usize;
-        // SAFETY: TX_BUF_DATA is protected by usb_irq_disable/enable.
+        // SAFETY: TX_BUF is protected by the surrounding
+        // `usb_irq_disable`/_enable window. The ISR writes only to `len`
+        // (via `irq_handler`), which cannot run while masked.
         unsafe {
-            let buf_ptr = &raw mut TX_BUF_DATA;
-            (*buf_ptr)[blocks - 1] = 0;
-            core::ptr::copy_nonoverlapping(data.as_ptr(), (*buf_ptr).as_mut_ptr() as *mut u8, len);
-            TX_BUF_LEN = len as u32;
+            let tx = &mut *TX_BUF.get();
+            tx.data[blocks - 1] = 0;
+            core::ptr::copy_nonoverlapping(data.as_ptr(), tx.data.as_mut_ptr() as *mut u8, len);
+            tx.len = len as u32;
         }
         let msk = readl(reg(DAINTMSK));
         writel(reg(DAINTMSK), msk | (1 << EP_BULK_IN));
@@ -503,7 +517,9 @@ pub fn usb_read_ep0(data: &mut [u8], max_len: u8) -> i8 {
 /// Read a SETUP packet from EP0.
 /// Returns the size of the setup packet, or -1 if not ready.
 pub fn usb_read_ep0_setup(data: &mut [u8], max_len: u8) -> i8 {
-    static mut SETUP_BUF: [u8; 8] = [0u8; 8];
+    /// Persistent SETUP staging buffer owned by `usb_read_ep0_setup`.
+    /// Only touched inside a `usb_irq_disable`/_enable window.
+    static SETUP_BUF: RacyCell<[u8; 8]> = RacyCell::new([0u8; 8]);
 
     usb_irq_disable();
     loop {
@@ -521,8 +537,7 @@ pub fn usb_read_ep0_setup(data: &mut [u8], max_len: u8) -> i8 {
             // SAFETY: SETUP_BUF is only accessed from this function,
             // which is protected by usb_irq_disable/enable.
             unsafe {
-                let buf_ptr = &raw mut SETUP_BUF;
-                fifo_read_packet(Some(&mut *buf_ptr), 8);
+                fifo_read_packet(Some(&mut *SETUP_BUF.get()), 8);
             }
         } else {
             // Discard other packets
@@ -548,11 +563,10 @@ pub fn usb_read_ep0_setup(data: &mut [u8], max_len: u8) -> i8 {
     usb_irq_enable();
 
     // Return previously read setup packet
-    // SAFETY: SETUP_BUF was just filled above, protected by irq disable.
+    // SAFETY: SETUP_BUF was just filled above under irq-disabled protection.
     let copy_len = max_len.min(8) as usize;
     unsafe {
-        let buf_ptr = &raw const SETUP_BUF;
-        core::ptr::copy_nonoverlapping((*buf_ptr).as_ptr(), data.as_mut_ptr(), copy_len);
+        core::ptr::copy_nonoverlapping((*SETUP_BUF.get()).as_ptr(), data.as_mut_ptr(), copy_len);
     }
     max_len as i8
 }
@@ -655,11 +669,10 @@ pub fn usb_set_configure() {
     );
     while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
 
-    // SAFETY: DOUBLE_BUFFER_TX / TX_BUF_LEN protected by usb_irq_disable above.
-    unsafe {
-        if DOUBLE_BUFFER_TX {
-            TX_BUF_LEN = 0;
-        }
+    // SAFETY: `TX_BUF` is protected by the surrounding
+    // `usb_irq_disable`/_enable window; the ISR cannot preempt.
+    if DOUBLE_BUFFER_TX.load(Ordering::Relaxed) {
+        unsafe { (*TX_BUF.get()).len = 0 };
     }
 
     usb_irq_enable();
@@ -697,14 +710,17 @@ pub fn irq_handler() {
         }
         if pend & (1 << EP_BULK_IN) != 0 {
             cdc::notify_bulk_in();
-            // SAFETY: TX_BUF_LEN / TX_BUF_DATA / DOUBLE_BUFFER_TX accessed
-            // in ISR context - no preemption within this handler.
-            unsafe {
-                if DOUBLE_BUFFER_TX && TX_BUF_LEN != 0 {
-                    let buf_ptr = &raw const TX_BUF_DATA;
-                    let ret = fifo_write_packet_fast(EP_BULK_IN, &*buf_ptr, TX_BUF_LEN);
-                    if ret == 0 {
-                        TX_BUF_LEN = 0;
+            // SAFETY: TX_BUF is accessed from the ISR, which cannot be
+            // preempted here. Task-context accesses hold usb_irq_disable
+            // across their window, so no overlap is possible.
+            if DOUBLE_BUFFER_TX.load(Ordering::Relaxed) {
+                unsafe {
+                    let tx = &mut *TX_BUF.get();
+                    if tx.len != 0 {
+                        let ret = fifo_write_packet_fast(EP_BULK_IN, &tx.data, tx.len);
+                        if ret == 0 {
+                            tx.len = 0;
+                        }
                     }
                 }
             }
@@ -743,13 +759,13 @@ pub struct OtgConfig {
 /// Must be called exactly once, before any other function in this module.
 /// `config.base_addr` must be the valid base address of an STM32 USB OTG peripheral.
 pub unsafe fn init(config: &OtgConfig) {
+    // Store configuration in statics.
+    USB_BASE.store(config.base_addr, Ordering::Relaxed);
+    USB_IRQ.store(config.irq_num, Ordering::Relaxed);
+    DOUBLE_BUFFER_TX.store(config.double_buffer_tx, Ordering::Relaxed);
+
     // SAFETY: caller ensures single-call + valid base_addr per function contract.
     unsafe {
-        // Store configuration in statics
-        USB_BASE = config.base_addr;
-        USB_IRQ = config.irq_num;
-        DOUBLE_BUFFER_TX = config.double_buffer_tx;
-
         // Wait for AHB idle
         while readl(reg(GRSTCTL)) & GRSTCTL_AHBIDL == 0 {}
 
@@ -799,15 +815,13 @@ pub unsafe fn init(config: &OtgConfig) {
 /// Returns the USB peripheral base address.
 /// Returns 0 if `init()` has not been called.
 pub fn usb_base() -> usize {
-    // SAFETY: USB_BASE is set once during init and never changed.
-    unsafe { USB_BASE }
+    USB_BASE.load(Ordering::Relaxed)
 }
 
 /// Check if the bulk IN endpoint is configured (USBAEP bit set).
 /// Returns true after SET_CONFIGURATION has been processed.
 pub fn is_bulk_in_configured() -> bool {
-    // SAFETY: USB_BASE is set during init.
-    let base = unsafe { USB_BASE };
+    let base = USB_BASE.load(Ordering::Relaxed);
     if base == 0 {
         return false;
     }
