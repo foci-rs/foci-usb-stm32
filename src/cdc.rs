@@ -359,156 +359,133 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
 /// Maximum number of descriptor entries.
 const MAX_DESCRIPTORS: usize = 8;
 
-/// Static descriptor storage.
-static mut DEVICE_DESC: UsbDeviceDescriptor = UsbDeviceDescriptor {
-    b_length: 0,
-    b_descriptor_type: 0,
-    bcd_usb: 0,
-    b_device_class: 0,
-    b_device_sub_class: 0,
-    b_device_protocol: 0,
-    b_max_packet_size0: 0,
-    id_vendor: 0,
-    id_product: 0,
-    bcd_device: 0,
-    i_manufacturer: 0,
-    i_product: 0,
-    i_serial_number: 0,
-    b_num_configurations: 0,
+/// Empty descriptor entry used to initialize the lookup table.
+const EMPTY_ENTRY: DescriptorEntry = DescriptorEntry {
+    w_value: 0,
+    w_index: 0,
+    data: core::ptr::null(),
+    size: 0,
 };
-static mut CONFIG_DESC: CdcConfigDescriptor = CdcConfigDescriptor {
-    config: descriptors::UsbConfigDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        w_total_length: 0,
-        b_num_interfaces: 0,
-        b_configuration_value: 0,
-        i_configuration: 0,
-        bm_attributes: 0,
-        b_max_power: 0,
-    },
-    iface0: descriptors::UsbInterfaceDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        b_interface_number: 0,
-        b_alternate_setting: 0,
-        b_num_endpoints: 0,
-        b_interface_class: 0,
-        b_interface_sub_class: 0,
-        b_interface_protocol: 0,
-        i_interface: 0,
-    },
-    cdc_hdr: descriptors::UsbCdcHeaderDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        b_descriptor_sub_type: 0,
-        bcd_cdc: 0,
-    },
-    cdc_acm: descriptors::UsbCdcAcmDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        b_descriptor_sub_type: 0,
-        bm_capabilities: 0,
-    },
-    cdc_union: descriptors::UsbCdcUnionDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        b_descriptor_sub_type: 0,
-        b_master_interface0: 0,
-        b_slave_interface0: 0,
-    },
-    ep1: descriptors::UsbEndpointDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        b_endpoint_address: 0,
-        bm_attributes: 0,
-        w_max_packet_size: 0,
-        b_interval: 0,
-    },
-    iface1: descriptors::UsbInterfaceDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        b_interface_number: 0,
-        b_alternate_setting: 0,
-        b_num_endpoints: 0,
-        b_interface_class: 0,
-        b_interface_sub_class: 0,
-        b_interface_protocol: 0,
-        i_interface: 0,
-    },
-    ep2: descriptors::UsbEndpointDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        b_endpoint_address: 0,
-        bm_attributes: 0,
-        w_max_packet_size: 0,
-        b_interval: 0,
-    },
-    ep3: descriptors::UsbEndpointDescriptor {
-        b_length: 0,
-        b_descriptor_type: 0,
-        b_endpoint_address: 0,
-        bm_attributes: 0,
-        w_max_packet_size: 0,
-        b_interval: 0,
-    },
-};
-static mut STR_LANG: StringDescriptorBuf = StringDescriptorBuf::lang_ids();
-static mut STR_MANUFACTURER: StringDescriptorBuf = StringDescriptorBuf::from_ascii("Klipper");
-static mut STR_PRODUCT: StringDescriptorBuf = StringDescriptorBuf::from_ascii("FOCI");
-static mut STR_SERIAL: StringDescriptorBuf = StringDescriptorBuf::from_ascii("00000000");
 
-static mut DESCRIPTOR_TABLE: [DescriptorEntry; MAX_DESCRIPTORS] = [
-    DescriptorEntry {
-        w_value: 0,
-        w_index: 0,
-        data: core::ptr::null(),
-        size: 0,
+/// Consolidated USB descriptor storage. Populated by `init`, patched by
+/// `set_serial_from_chip_id`, and read by `usb_req_get_descriptor`.
+struct Descriptors {
+    device: UsbDeviceDescriptor,
+    config: CdcConfigDescriptor,
+    str_lang: StringDescriptorBuf,
+    str_manufacturer: StringDescriptorBuf,
+    str_product: StringDescriptorBuf,
+    str_serial: StringDescriptorBuf,
+    table: [DescriptorEntry; MAX_DESCRIPTORS],
+    count: usize,
+}
+
+/// USB descriptor table. Initialized once by `init()` and afterwards
+/// read by the EP0 task in response to GET_DESCRIPTOR requests.
+/// `set_serial_from_chip_id` is the only other writer; it must run
+/// before USB enumeration reads the serial string (see its safety
+/// contract).
+static DESCRIPTORS: RacyCell<Descriptors> = RacyCell::new(Descriptors {
+    device: UsbDeviceDescriptor {
+        b_length: 0,
+        b_descriptor_type: 0,
+        bcd_usb: 0,
+        b_device_class: 0,
+        b_device_sub_class: 0,
+        b_device_protocol: 0,
+        b_max_packet_size0: 0,
+        id_vendor: 0,
+        id_product: 0,
+        bcd_device: 0,
+        i_manufacturer: 0,
+        i_product: 0,
+        i_serial_number: 0,
+        b_num_configurations: 0,
     },
-    DescriptorEntry {
-        w_value: 0,
-        w_index: 0,
-        data: core::ptr::null(),
-        size: 0,
+    config: CdcConfigDescriptor {
+        config: descriptors::UsbConfigDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            w_total_length: 0,
+            b_num_interfaces: 0,
+            b_configuration_value: 0,
+            i_configuration: 0,
+            bm_attributes: 0,
+            b_max_power: 0,
+        },
+        iface0: descriptors::UsbInterfaceDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            b_interface_number: 0,
+            b_alternate_setting: 0,
+            b_num_endpoints: 0,
+            b_interface_class: 0,
+            b_interface_sub_class: 0,
+            b_interface_protocol: 0,
+            i_interface: 0,
+        },
+        cdc_hdr: descriptors::UsbCdcHeaderDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            b_descriptor_sub_type: 0,
+            bcd_cdc: 0,
+        },
+        cdc_acm: descriptors::UsbCdcAcmDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            b_descriptor_sub_type: 0,
+            bm_capabilities: 0,
+        },
+        cdc_union: descriptors::UsbCdcUnionDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            b_descriptor_sub_type: 0,
+            b_master_interface0: 0,
+            b_slave_interface0: 0,
+        },
+        ep1: descriptors::UsbEndpointDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            b_endpoint_address: 0,
+            bm_attributes: 0,
+            w_max_packet_size: 0,
+            b_interval: 0,
+        },
+        iface1: descriptors::UsbInterfaceDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            b_interface_number: 0,
+            b_alternate_setting: 0,
+            b_num_endpoints: 0,
+            b_interface_class: 0,
+            b_interface_sub_class: 0,
+            b_interface_protocol: 0,
+            i_interface: 0,
+        },
+        ep2: descriptors::UsbEndpointDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            b_endpoint_address: 0,
+            bm_attributes: 0,
+            w_max_packet_size: 0,
+            b_interval: 0,
+        },
+        ep3: descriptors::UsbEndpointDescriptor {
+            b_length: 0,
+            b_descriptor_type: 0,
+            b_endpoint_address: 0,
+            bm_attributes: 0,
+            w_max_packet_size: 0,
+            b_interval: 0,
+        },
     },
-    DescriptorEntry {
-        w_value: 0,
-        w_index: 0,
-        data: core::ptr::null(),
-        size: 0,
-    },
-    DescriptorEntry {
-        w_value: 0,
-        w_index: 0,
-        data: core::ptr::null(),
-        size: 0,
-    },
-    DescriptorEntry {
-        w_value: 0,
-        w_index: 0,
-        data: core::ptr::null(),
-        size: 0,
-    },
-    DescriptorEntry {
-        w_value: 0,
-        w_index: 0,
-        data: core::ptr::null(),
-        size: 0,
-    },
-    DescriptorEntry {
-        w_value: 0,
-        w_index: 0,
-        data: core::ptr::null(),
-        size: 0,
-    },
-    DescriptorEntry {
-        w_value: 0,
-        w_index: 0,
-        data: core::ptr::null(),
-        size: 0,
-    },
-];
-static mut DESCRIPTOR_COUNT: usize = 0;
+    str_lang: StringDescriptorBuf::lang_ids(),
+    str_manufacturer: StringDescriptorBuf::from_ascii("Klipper"),
+    str_product: StringDescriptorBuf::from_ascii("FOCI"),
+    str_serial: StringDescriptorBuf::from_ascii("00000000"),
+    table: [EMPTY_ENTRY; MAX_DESCRIPTORS],
+    count: 0,
+});
 
 // ----------------------------------------------------------------
 // EP0 request handlers (port of usb_cdc.c request handlers)
@@ -520,21 +497,14 @@ fn usb_req_get_descriptor(req: &UsbCtrlRequest) {
         usb_do_stall();
         return;
     }
-    // SAFETY: DESCRIPTOR_TABLE/DESCRIPTOR_COUNT are initialized once at
-    // init time and only read here.
-    #[allow(clippy::needless_range_loop)]
+    // SAFETY: `DESCRIPTORS` is initialized once at init time and only read
+    // from the EP0 task context afterwards; no concurrent writer.
     let (desc, mut size) = unsafe {
+        let d = &*DESCRIPTORS.get();
         let mut found: Option<(*const u8, u8)> = None;
-        let table_ptr = &raw const DESCRIPTOR_TABLE;
-        let count = DESCRIPTOR_COUNT;
-        for i in 0..count {
-            let entry_ptr = (*table_ptr).as_ptr().add(i);
-            let w_value = core::ptr::addr_of!((*entry_ptr).w_value).read();
-            let w_index = core::ptr::addr_of!((*entry_ptr).w_index).read();
-            if w_value == req.w_value && w_index == req.w_index {
-                let data = core::ptr::addr_of!((*entry_ptr).data).read();
-                let entry_size = core::ptr::addr_of!((*entry_ptr).size).read();
-                found = Some((data, entry_size));
+        for entry in d.table.iter().take(d.count) {
+            if entry.w_value == req.w_value && entry.w_index == req.w_index {
+                found = Some((entry.data, entry.size));
             }
         }
         match found {
@@ -744,39 +714,43 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         // Check for Katapult bootloader (must happen before USB traffic).
         detect_bootloader();
 
-        // Build descriptors
-        DEVICE_DESC = descriptors::build_device_descriptor(vid, pid);
-        CONFIG_DESC = descriptors::build_config_descriptor();
-        STR_LANG = StringDescriptorBuf::lang_ids();
-        STR_MANUFACTURER = StringDescriptorBuf::from_ascii(manufacturer);
-        STR_PRODUCT = StringDescriptorBuf::from_ascii(product);
-        STR_SERIAL = StringDescriptorBuf::from_ascii(serial);
+        // Build descriptors.
+        let d = &mut *DESCRIPTORS.get();
+        d.device = descriptors::build_device_descriptor(vid, pid);
+        d.config = descriptors::build_config_descriptor();
+        d.str_lang = StringDescriptorBuf::lang_ids();
+        d.str_manufacturer = StringDescriptorBuf::from_ascii(manufacturer);
+        d.str_product = StringDescriptorBuf::from_ascii(product);
+        d.str_serial = StringDescriptorBuf::from_ascii(serial);
 
-        // Build descriptor lookup table using raw pointers to avoid
-        // creating references to mutable statics.
+        // Build descriptor lookup table using raw pointers into `DESCRIPTORS`
+        // so every entry points to storage with static lifetime.
+        let device_ptr = (&raw const d.device) as *const u8;
+        let config_ptr = (&raw const d.config) as *const u8;
+        let (lang_ptr, lang_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_lang);
+        let (mfr_ptr, mfr_len) =
+            StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_manufacturer);
+        let (prod_ptr, prod_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_product);
+        let (ser_ptr, ser_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_serial);
+
         let mut idx = 0;
-
-        // Device descriptor
-        DESCRIPTOR_TABLE[idx] = DescriptorEntry {
+        d.table[idx] = DescriptorEntry {
             w_value: (descriptors::USB_DT_DEVICE as u16) << 8,
             w_index: 0,
-            data: (&raw const DEVICE_DESC) as *const u8,
+            data: device_ptr,
             size: core::mem::size_of::<UsbDeviceDescriptor>() as u8,
         };
         idx += 1;
 
-        // Config descriptor
-        DESCRIPTOR_TABLE[idx] = DescriptorEntry {
+        d.table[idx] = DescriptorEntry {
             w_value: (descriptors::USB_DT_CONFIG as u16) << 8,
             w_index: 0,
-            data: (&raw const CONFIG_DESC) as *const u8,
+            data: config_ptr,
             size: core::mem::size_of::<CdcConfigDescriptor>() as u8,
         };
         idx += 1;
 
-        // String 0: Language IDs
-        let (lang_ptr, lang_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const STR_LANG);
-        DESCRIPTOR_TABLE[idx] = DescriptorEntry {
+        d.table[idx] = DescriptorEntry {
             w_value: (descriptors::USB_DT_STRING as u16) << 8,
             w_index: 0,
             data: lang_ptr,
@@ -784,9 +758,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         };
         idx += 1;
 
-        // String 1: Manufacturer
-        let (mfr_ptr, mfr_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const STR_MANUFACTURER);
-        DESCRIPTOR_TABLE[idx] = DescriptorEntry {
+        d.table[idx] = DescriptorEntry {
             w_value: (descriptors::USB_DT_STRING as u16) << 8
                 | descriptors::USB_STR_ID_MANUFACTURER as u16,
             w_index: descriptors::USB_LANGID_ENGLISH_US,
@@ -795,9 +767,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         };
         idx += 1;
 
-        // String 2: Product
-        let (prod_ptr, prod_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const STR_PRODUCT);
-        DESCRIPTOR_TABLE[idx] = DescriptorEntry {
+        d.table[idx] = DescriptorEntry {
             w_value: (descriptors::USB_DT_STRING as u16) << 8
                 | descriptors::USB_STR_ID_PRODUCT as u16,
             w_index: descriptors::USB_LANGID_ENGLISH_US,
@@ -806,9 +776,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         };
         idx += 1;
 
-        // String 3: Serial
-        let (ser_ptr, ser_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const STR_SERIAL);
-        DESCRIPTOR_TABLE[idx] = DescriptorEntry {
+        d.table[idx] = DescriptorEntry {
             w_value: (descriptors::USB_DT_STRING as u16) << 8
                 | descriptors::USB_STR_ID_SERIAL as u16,
             w_index: descriptors::USB_LANGID_ENGLISH_US,
@@ -817,7 +785,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         };
         idx += 1;
 
-        DESCRIPTOR_COUNT = idx;
+        d.count = idx;
 
         // Reset transfer state.
         *XFER.get() = XferState {
@@ -843,25 +811,19 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
 /// Must be called before USB enumeration completes (before the host
 /// reads the serial descriptor).
 pub unsafe fn set_serial_from_chip_id(id: &[u8], strlen: usize) {
-    // SAFETY: caller ensures this runs after `init()` and before
-    // USB enumeration reads the serial descriptor, so STR_SERIAL and
-    // DESCRIPTOR_TABLE have no concurrent access.
+    // SAFETY: caller ensures this runs after `init()` and before USB
+    // enumeration reads the serial descriptor, so `DESCRIPTORS` has no
+    // concurrent access.
     unsafe {
-        let serial_ptr = &raw mut STR_SERIAL;
-        descriptors::fill_serial_from_chip_id(&mut *serial_ptr, strlen, id);
-        // Update the descriptor table entry for the serial string
+        let d = &mut *DESCRIPTORS.get();
+        descriptors::fill_serial_from_chip_id(&mut d.str_serial, strlen, id);
         let expected_wvalue =
             (descriptors::USB_DT_STRING as u16) << 8 | descriptors::USB_STR_ID_SERIAL as u16;
-        let (ser_ptr, ser_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const STR_SERIAL);
-        let table_ptr = &raw mut DESCRIPTOR_TABLE;
-        let count = DESCRIPTOR_COUNT;
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..count {
-            let entry_ptr = (*table_ptr).as_mut_ptr().add(i);
-            let w_value = core::ptr::addr_of!((*entry_ptr).w_value).read();
-            if w_value == expected_wvalue {
-                core::ptr::addr_of_mut!((*entry_ptr).data).write(ser_ptr);
-                core::ptr::addr_of_mut!((*entry_ptr).size).write(ser_len);
+        let (ser_ptr, ser_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_serial);
+        for entry in d.table.iter_mut().take(d.count) {
+            if entry.w_value == expected_wvalue {
+                entry.data = ser_ptr;
+                entry.size = ser_len;
                 break;
             }
         }
