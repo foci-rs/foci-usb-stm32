@@ -18,8 +18,11 @@ use core::cell::UnsafeCell;
 pub(crate) struct RacyCell<T>(UnsafeCell<T>);
 
 // SAFETY: `RacyCell<T>` is a `Sync`-qualified `UnsafeCell<T>`. The safety
-// obligation is discharged at each unsafe access site within this crate.
-unsafe impl<T: Send> Sync for RacyCell<T> {}
+// obligation — at most one live reference across contexts — is discharged
+// at each unsafe access site within this crate. `T` is not required to be
+// `Send`; any `T` that the crate stores (including raw pointers) is moved
+// between tasks only through the documented access protocol.
+unsafe impl<T> Sync for RacyCell<T> {}
 
 impl<T> RacyCell<T> {
     /// Construct a new cell holding `value`.

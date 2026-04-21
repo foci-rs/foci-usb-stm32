@@ -236,29 +236,49 @@ const UX_SEND: u8 = 1 << 1;
 const UX_SEND_ZLP: u8 = 1 << 3;
 // Note: UX_SEND_PROGMEM (1 << 2) not needed -- no PROGMEM on ARM Cortex-M.
 
-// SAFETY: These statics are protected by the EP0 task running in a single
-// RTIC task context. The ISR only sets wake flags.
-static mut USB_XFER_DATA: *mut u8 = core::ptr::null_mut();
-static mut USB_XFER_SIZE: u8 = 0;
-static mut USB_XFER_FLAGS: u8 = 0;
+/// EP0 control-transfer continuation state. Filled when `usb_do_xfer`
+/// returns before the transfer completes (hardware busy) and consumed by
+/// the next `ep0_task` invocation.
+struct XferState {
+    data: *mut u8,
+    size: u8,
+    flags: u8,
+}
 
-/// CDC line coding state
-static mut LINE_CODING: UsbCdcLineCoding = UsbCdcLineCoding {
-    dw_dte_rate: 0,
-    b_char_format: 0,
-    b_parity_type: 0,
-    b_data_bits: 0,
-};
+/// EP0 transfer continuation. Accessed only from the single RTIC task
+/// context running `ep0_task` and its helpers; the ISR only sets the
+/// EP0 wake flag.
+static XFER: RacyCell<XferState> = RacyCell::new(XferState {
+    data: core::ptr::null_mut(),
+    size: 0,
+    flags: 0,
+});
 
-/// CDC line control state (DTR/RTS bits)
-static mut LINE_CONTROL_STATE: u8 = 0;
+/// CDC line state: baud/format/parity/data-bits plus the DTR/RTS control
+/// bits. Written by SET_LINE_CODING / SET_CONTROL_LINE_STATE handlers and
+/// read by the Katapult reboot detection, all from the same task context.
+struct LineState {
+    coding: UsbCdcLineCoding,
+    /// DTR/RTS flags from `SET_CONTROL_LINE_STATE`.
+    control: u8,
+}
+
+static LINE: RacyCell<LineState> = RacyCell::new(LineState {
+    coding: UsbCdcLineCoding {
+        dw_dte_rate: 0,
+        b_char_format: 0,
+        b_parity_type: 0,
+        b_data_bits: 0,
+    },
+    control: 0,
+});
 
 /// Stall EP0 and clear transfer state.
 fn usb_do_stall() {
     otg::usb_stall_ep0();
-    // SAFETY: Protected by task context.
+    // SAFETY: `XFER` is only touched from the EP0 task context.
     unsafe {
-        USB_XFER_FLAGS = 0;
+        (*XFER.get()).flags = 0;
     }
 }
 
@@ -309,9 +329,9 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
                     // Must send zero-length-packet
                     continue;
                 }
-                // SAFETY: Protected by task context.
+                // SAFETY: `XFER` is only touched from the EP0 task context.
                 unsafe {
-                    USB_XFER_FLAGS = 0;
+                    (*XFER.get()).flags = 0;
                 }
                 notify_ep0();
                 return;
@@ -319,12 +339,10 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
             continue;
         }
         if ret == -1 {
-            // Interface busy - retry later
-            // SAFETY: Protected by task context.
+            // Interface busy — save continuation for the next ep0_task pass.
+            // SAFETY: `XFER` is only touched from the EP0 task context.
             unsafe {
-                USB_XFER_DATA = data;
-                USB_XFER_SIZE = size;
-                USB_XFER_FLAGS = flags;
+                *XFER.get() = XferState { data, size, flags };
             }
             return;
         }
@@ -565,7 +583,7 @@ const KATAPULT_REQUEST: u64 = 0x5984_E3FA_6CA1_589B; // stay in bootloader
 
 /// True if a valid Katapult bootloader was detected at boot.
 /// Set once during `detect_bootloader()`, read by `check_reboot()`.
-static mut HAS_BOOTLOADER: bool = false;
+static HAS_BOOTLOADER: AtomicBool = AtomicBool::new(false);
 
 /// Probe for a Katapult bootloader at KATAPULT_BOOT_ADDRESS.
 /// Call once during init, before USB traffic starts.
@@ -578,7 +596,7 @@ fn detect_bootloader() {
         if (boot_sig_addr as usize).is_multiple_of(8)
             && core::ptr::read_volatile(boot_sig_addr) == KATAPULT_SIGNATURE
         {
-            HAS_BOOTLOADER = true;
+            HAS_BOOTLOADER.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -605,15 +623,16 @@ fn bootloader_request() {
 /// Katapult bootloader was detected at boot (mirrors Klipper C's
 /// `CONFIG_HAVE_BOOTLOADER_REQUEST` compile-time guard).
 fn check_reboot() {
-    // SAFETY: LINE_CODING/LINE_CONTROL_STATE/HAS_BOOTLOADER accessed
-    // from task context only.
-    unsafe {
-        if !HAS_BOOTLOADER {
-            return;
-        }
-        if LINE_CODING.dw_dte_rate == 1200 && (LINE_CONTROL_STATE & 0x01) == 0 {
-            bootloader_request();
-        }
+    if !HAS_BOOTLOADER.load(Ordering::Relaxed) {
+        return;
+    }
+    // SAFETY: `LINE` is only touched from the EP0 task context.
+    let (baud, control) = unsafe {
+        let line = &*LINE.get();
+        (line.coding.dw_dte_rate, line.control)
+    };
+    if baud == 1200 && (control & 0x01) == 0 {
+        bootloader_request();
     }
 }
 
@@ -628,8 +647,9 @@ fn usb_req_set_line_coding(req: &UsbCtrlRequest) {
         usb_do_stall();
         return;
     }
-    // SAFETY: LINE_CODING only accessed from task context.
-    let ptr = &raw mut LINE_CODING;
+    // SAFETY: `LINE` is only touched from the EP0 task context; the
+    // raw pointer is valid for the duration of `usb_do_xfer`.
+    let ptr = unsafe { &raw mut (*LINE.get()).coding };
     usb_do_xfer(ptr as *mut u8, line_coding_size as u8, UX_READ);
     check_reboot();
 }
@@ -645,8 +665,9 @@ fn usb_req_get_line_coding(req: &UsbCtrlRequest) {
         usb_do_stall();
         return;
     }
-    // SAFETY: LINE_CODING only accessed from task context.
-    let ptr = &raw const LINE_CODING;
+    // SAFETY: `LINE` is only touched from the EP0 task context; the raw
+    // pointer is valid for the duration of `usb_do_xfer`.
+    let ptr = unsafe { &raw const (*LINE.get()).coding };
     usb_do_xfer(ptr as *mut u8, line_coding_size as u8, UX_SEND);
 }
 
@@ -656,9 +677,9 @@ fn usb_req_set_line(req: &UsbCtrlRequest) {
         usb_do_stall();
         return;
     }
-    // SAFETY: LINE_CONTROL_STATE is only accessed from task context.
+    // SAFETY: `LINE` is only touched from the EP0 task context.
     unsafe {
-        LINE_CONTROL_STATE = req.w_value as u8;
+        (*LINE.get()).control = req.w_value as u8;
     }
     usb_do_xfer(core::ptr::null_mut(), 0, UX_SEND);
     check_reboot();
@@ -694,14 +715,15 @@ fn ep0_task() {
     if !check_ep0_wake() {
         return;
     }
-    // SAFETY: USB_XFER_FLAGS/USB_XFER_DATA/USB_XFER_SIZE accessed
-    // from task context only.
-    unsafe {
-        if USB_XFER_FLAGS != 0 {
-            usb_do_xfer(USB_XFER_DATA, USB_XFER_SIZE, USB_XFER_FLAGS);
-        } else {
-            usb_state_ready();
-        }
+    // SAFETY: `XFER` is only touched from the EP0 task context.
+    let (data, size, flags) = unsafe {
+        let xfer = &*XFER.get();
+        (xfer.data, xfer.size, xfer.flags)
+    };
+    if flags != 0 {
+        usb_do_xfer(data, size, flags);
+    } else {
+        usb_state_ready();
     }
 }
 
@@ -797,14 +819,18 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
 
         DESCRIPTOR_COUNT = idx;
 
-        // Reset transfer state
-        USB_XFER_DATA = core::ptr::null_mut();
-        USB_XFER_SIZE = 0;
-        USB_XFER_FLAGS = 0;
+        // Reset transfer state.
+        *XFER.get() = XferState {
+            data: core::ptr::null_mut(),
+            size: 0,
+            flags: 0,
+        };
         (*TX.get()).pos = 0;
         (*RX.get()).pos = 0;
-        LINE_CODING = UsbCdcLineCoding::default();
-        LINE_CONTROL_STATE = 0;
+        *LINE.get() = LineState {
+            coding: UsbCdcLineCoding::default(),
+            control: 0,
+        };
     }
 }
 
