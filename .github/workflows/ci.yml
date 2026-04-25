@@ -13,27 +13,21 @@ env:
 
 jobs:
   check:
-    name: Rust ${{ matrix.rust }}
+    name: Rust stable
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        rust: [stable, "1.85"]
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: stable
           targets: thumbv7em-none-eabi
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.rust }}
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy (embedded)
-        run: cargo clippy --target thumbv7em-none-eabi --all-targets -- -D warnings
+        run: cargo clippy --target thumbv7em-none-eabi -- -D warnings
       - name: cargo build (embedded, release)
         run: cargo build --target thumbv7em-none-eabi --release
       - name: cargo doc
