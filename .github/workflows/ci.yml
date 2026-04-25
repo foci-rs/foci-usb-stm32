@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Rust ${{ matrix.rust }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          targets: thumbv7em-none-eabi
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rust }}
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy (embedded)
+        run: cargo clippy --target thumbv7em-none-eabi --all-targets -- -D warnings
+      - name: cargo build (embedded, release)
+        run: cargo build --target thumbv7em-none-eabi --release
+      - name: cargo doc
+        run: cargo doc --target thumbv7em-none-eabi --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
