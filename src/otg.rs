@@ -518,9 +518,10 @@ pub fn usb_send_trace_in(data: &[u8]) -> i8 {
     usb_irq_disable();
     let ctl = readl(reg(diepctl(EP_TRACE_IN)));
     if ctl & DEPCTL_USBAEP == 0 {
-        // Controller not enabled - discard data.
+        // Controller not enabled. Report no accepted bytes so callers can
+        // count endpoint-not-ready pressure instead of silently losing frames.
         usb_irq_enable();
-        return len as i8;
+        return 0;
     }
     if ctl & DEPCTL_EPENA != 0 {
         let msk = readl(reg(DAINTMSK));
