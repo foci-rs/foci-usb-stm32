@@ -12,6 +12,8 @@ use core::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 
 use crate::cdc;
 use crate::ep::{EP_ACM, EP_ACM_SIZE, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE};
+#[cfg(feature = "trace")]
+use crate::ep::{EP_TRACE_IN, EP_TRACE_IN_SIZE};
 use crate::sync::RacyCell;
 
 // ----------------------------------------------------------------
@@ -143,6 +145,10 @@ const GRXSTSP_PKTSTS_MSK: u32 = 0x0F << GRXSTSP_PKTSTS_POS;
 const TX0FSA_POS: u32 = 0;
 const TX0FD_POS: u32 = 16;
 
+// STM32F407 OTG FS has 320 32-bit FIFO words total. The trace build uses:
+// RX=80, EP0=16, ACM=16, CDC bulk IN=16, trace IN=32 => 160 words.
+const OTG_FS_FIFO_WORDS: u32 = 320;
+
 // ----------------------------------------------------------------
 // Static state (protected by usb_irq_disable/enable like Klipper)
 // ----------------------------------------------------------------
@@ -267,7 +273,19 @@ fn fifo_configure() {
         reg(dieptxf(EP_BULK_IN)),
         (fpos << TX0FSA_POS) | (ep_size << TX0FD_POS),
     );
-    // fpos += ep_size; // not used after this
+    fpos += ep_size;
+
+    #[cfg(feature = "trace")]
+    {
+        let trace_ep_size: u32 = 0x20;
+        writel(
+            reg(dieptxf(EP_TRACE_IN)),
+            (fpos << TX0FSA_POS) | (trace_ep_size << TX0FD_POS),
+        );
+        fpos += trace_ep_size;
+    }
+
+    debug_assert!(fpos <= OTG_FS_FIFO_WORDS);
 }
 
 /// Write a packet to a TX FIFO. Matches `fifo_write_packet()` in usbotg.c.
@@ -490,6 +508,31 @@ pub fn usb_send_bulk_in(data: &[u8]) -> i8 {
     ret
 }
 
+/// Send data on the trace bulk IN endpoint.
+///
+/// Returns number of bytes sent, or -1 if busy. The caller is responsible for
+/// splitting larger frames into full-speed packets.
+#[cfg(feature = "trace")]
+pub fn usb_send_trace_in(data: &[u8]) -> i8 {
+    let len = data.len().min(EP_TRACE_IN_SIZE);
+    usb_irq_disable();
+    let ctl = readl(reg(diepctl(EP_TRACE_IN)));
+    if ctl & DEPCTL_USBAEP == 0 {
+        // Controller not enabled - discard data.
+        usb_irq_enable();
+        return len as i8;
+    }
+    if ctl & DEPCTL_EPENA != 0 {
+        let msk = readl(reg(DAINTMSK));
+        writel(reg(DAINTMSK), msk | (1 << EP_TRACE_IN));
+        usb_irq_enable();
+        return -1;
+    }
+    let ret = fifo_write_packet(EP_TRACE_IN, &data[..len]);
+    usb_irq_enable();
+    ret
+}
+
 /// Read data from EP0 (non-setup data phase).
 /// Returns bytes read, -1 if no data, -2 if transfer interrupted.
 pub fn usb_read_ep0(data: &mut [u8], max_len: u8) -> i8 {
@@ -669,6 +712,31 @@ pub fn usb_set_configure() {
     );
     while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
 
+    #[cfg(feature = "trace")]
+    {
+        // Configure and flush EP_TRACE_IN.
+        writel(
+            reg(dieptsiz(EP_TRACE_IN)),
+            EP_TRACE_IN_SIZE as u32 | (1 << DEPTSIZ_PKTCNT_POS),
+        );
+        writel(
+            reg(diepctl(EP_TRACE_IN)),
+            DEPCTL_SNAK
+                | DEPCTL_EPDIS
+                | DEPCTL_USBAEP
+                | (0x02 << DEPCTL_EPTYP_POS)
+                | DEPCTL_SD0PID
+                | ((EP_TRACE_IN as u32) << DIEPCTL_TXFNUM_POS)
+                | ((EP_TRACE_IN_SIZE as u32) << DEPCTL_MPSIZ_POS),
+        );
+        while readl(reg(diepctl(EP_TRACE_IN))) & DEPCTL_EPENA != 0 {}
+        writel(
+            reg(GRSTCTL),
+            ((EP_TRACE_IN as u32) << GRSTCTL_TXFNUM_POS) | GRSTCTL_TXFFLSH,
+        );
+        while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
+    }
+
     // SAFETY: `TX_BUF` is protected by the surrounding
     // `usb_irq_disable`/_enable window; the ISR cannot preempt.
     if DOUBLE_BUFFER_TX.load(Ordering::Relaxed) {
@@ -724,6 +792,10 @@ pub fn irq_handler() {
                     }
                 }
             }
+        }
+        #[cfg(feature = "trace")]
+        if pend & (1 << EP_TRACE_IN) != 0 {
+            notify_wake();
         }
     }
 }

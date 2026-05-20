@@ -14,6 +14,8 @@ pub mod cdc;
 pub mod descriptors;
 pub mod otg;
 mod sync;
+#[cfg(feature = "trace")]
+pub mod trace;
 
 /// Endpoint constants (from usb_cdc_ep.h)
 pub mod ep {
@@ -126,6 +128,15 @@ pub fn rx_consume(len: usize) {
 /// Write data to the USB transmit buffer.
 pub fn tx_write(data: &[u8]) {
     cdc::tx_write(data);
+}
+
+/// Write one packet to the trace bulk IN endpoint.
+///
+/// Returns the number of bytes accepted by the USB controller, or -1 if EP4 is
+/// busy and the caller should retry later.
+#[cfg(feature = "trace")]
+pub fn trace_write(data: &[u8]) -> i8 {
+    trace::send_trace_in(data)
 }
 
 /// Check if the USB device is configured.
