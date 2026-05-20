@@ -8,6 +8,8 @@
 use crate::ep::{
     EP_ACM, EP_ACM_SIZE, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE, EP0_SIZE,
 };
+#[cfg(feature = "trace")]
+use crate::ep::{EP_TRACE_IN, EP_TRACE_IN_SIZE};
 
 // USB standard constants
 pub const USB_DIR_OUT: u8 = 0x00;
@@ -24,6 +26,8 @@ pub const USB_DT_INTERFACE: u8 = 0x04;
 pub const USB_DT_ENDPOINT: u8 = 0x05;
 
 pub const USB_CLASS_COMM: u8 = 0x02;
+#[cfg(feature = "trace")]
+pub const USB_CLASS_VENDOR_SPECIFIC: u8 = 0xFF;
 
 pub const USB_ENDPOINT_XFER_BULK: u8 = 0x02;
 pub const USB_ENDPOINT_XFER_INT: u8 = 0x03;
@@ -175,6 +179,24 @@ pub struct CdcConfigDescriptor {
     pub ep3: UsbEndpointDescriptor,
 }
 
+/// CDC configuration descriptor plus trace vendor-specific bulk IN interface.
+#[cfg(feature = "trace")]
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct CdcTraceConfigDescriptor {
+    pub config: UsbConfigDescriptor,
+    pub iface0: UsbInterfaceDescriptor,
+    pub cdc_hdr: UsbCdcHeaderDescriptor,
+    pub cdc_acm: UsbCdcAcmDescriptor,
+    pub cdc_union: UsbCdcUnionDescriptor,
+    pub ep1: UsbEndpointDescriptor,
+    pub iface1: UsbInterfaceDescriptor,
+    pub ep2: UsbEndpointDescriptor,
+    pub ep3: UsbEndpointDescriptor,
+    pub trace_iface: UsbInterfaceDescriptor,
+    pub trace_ep: UsbEndpointDescriptor,
+}
+
 /// Build the static device descriptor from config parameters.
 pub const fn build_device_descriptor(vid: u16, pid: u16) -> UsbDeviceDescriptor {
     UsbDeviceDescriptor {
@@ -271,6 +293,46 @@ pub const fn build_config_descriptor() -> CdcConfigDescriptor {
             b_endpoint_address: EP_BULK_IN as u8 | USB_DIR_IN,
             bm_attributes: USB_ENDPOINT_XFER_BULK,
             w_max_packet_size: (EP_BULK_IN_SIZE as u16).to_le(),
+            b_interval: 0,
+        },
+    }
+}
+
+/// Build the CDC plus trace configuration descriptor.
+#[cfg(feature = "trace")]
+pub const fn build_trace_config_descriptor() -> CdcTraceConfigDescriptor {
+    let cdc = build_config_descriptor();
+    CdcTraceConfigDescriptor {
+        config: UsbConfigDescriptor {
+            w_total_length: (core::mem::size_of::<CdcTraceConfigDescriptor>() as u16).to_le(),
+            b_num_interfaces: 3,
+            ..cdc.config
+        },
+        iface0: cdc.iface0,
+        cdc_hdr: cdc.cdc_hdr,
+        cdc_acm: cdc.cdc_acm,
+        cdc_union: cdc.cdc_union,
+        ep1: cdc.ep1,
+        iface1: cdc.iface1,
+        ep2: cdc.ep2,
+        ep3: cdc.ep3,
+        trace_iface: UsbInterfaceDescriptor {
+            b_length: core::mem::size_of::<UsbInterfaceDescriptor>() as u8,
+            b_descriptor_type: USB_DT_INTERFACE,
+            b_interface_number: 2,
+            b_alternate_setting: 0,
+            b_num_endpoints: 1,
+            b_interface_class: USB_CLASS_VENDOR_SPECIFIC,
+            b_interface_sub_class: 0,
+            b_interface_protocol: 0,
+            i_interface: 0,
+        },
+        trace_ep: UsbEndpointDescriptor {
+            b_length: core::mem::size_of::<UsbEndpointDescriptor>() as u8,
+            b_descriptor_type: USB_DT_ENDPOINT,
+            b_endpoint_address: EP_TRACE_IN as u8 | USB_DIR_IN,
+            bm_attributes: USB_ENDPOINT_XFER_BULK,
+            w_max_packet_size: (EP_TRACE_IN_SIZE as u16).to_le(),
             b_interval: 0,
         },
     }
@@ -391,3 +453,45 @@ pub struct DescriptorEntry {
 // storage with 'static lifetime.
 unsafe impl Send for DescriptorEntry {}
 unsafe impl Sync for DescriptorEntry {}
+
+#[cfg(test)]
+mod trace_descriptor_tests {
+    use super::*;
+
+    fn bytes<T>(value: &T) -> &[u8] {
+        let ptr = value as *const T as *const u8;
+        // SAFETY: `value` is valid for `size_of::<T>()` bytes and this helper
+        // only reinterprets it as immutable bytes for descriptor layout tests.
+        unsafe { core::slice::from_raw_parts(ptr, core::mem::size_of::<T>()) }
+    }
+
+    #[test]
+    fn production_config_descriptor_bytes_stay_stable() {
+        let cfg = build_config_descriptor();
+        let data = bytes(&cfg);
+        let total_length = cfg.config.w_total_length;
+
+        assert_eq!(data.len(), core::mem::size_of::<CdcConfigDescriptor>());
+        assert_eq!(cfg.config.b_num_interfaces, 2);
+        assert_eq!(u16::from_le(total_length), data.len() as u16);
+        assert_eq!(cfg.iface0.b_interface_number, 0);
+        assert_eq!(cfg.iface1.b_interface_number, 1);
+    }
+
+    #[cfg(feature = "trace")]
+    #[test]
+    fn trace_config_adds_vendor_bulk_in_after_cdc() {
+        let cfg = build_trace_config_descriptor();
+        let data = bytes(&cfg);
+        let total_length = cfg.config.w_total_length;
+        let trace_ep_address = cfg.trace_ep.b_endpoint_address;
+
+        assert_eq!(cfg.config.b_num_interfaces, 3);
+        assert_eq!(u16::from_le(total_length), data.len() as u16);
+        assert_eq!(cfg.iface0.b_interface_number, 0);
+        assert_eq!(cfg.iface1.b_interface_number, 1);
+        assert_eq!(cfg.trace_iface.b_interface_number, 2);
+        assert_eq!(cfg.trace_iface.b_interface_class, USB_CLASS_VENDOR_SPECIFIC);
+        assert_eq!(trace_ep_address, crate::ep::EP_TRACE_IN as u8 | USB_DIR_IN);
+    }
+}

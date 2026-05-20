@@ -372,6 +372,8 @@ const EMPTY_ENTRY: DescriptorEntry = DescriptorEntry {
 struct Descriptors {
     device: UsbDeviceDescriptor,
     config: CdcConfigDescriptor,
+    #[cfg(feature = "trace")]
+    trace_config: descriptors::CdcTraceConfigDescriptor,
     str_lang: StringDescriptorBuf,
     str_manufacturer: StringDescriptorBuf,
     str_product: StringDescriptorBuf,
@@ -479,6 +481,8 @@ static DESCRIPTORS: RacyCell<Descriptors> = RacyCell::new(Descriptors {
             b_interval: 0,
         },
     },
+    #[cfg(feature = "trace")]
+    trace_config: descriptors::build_trace_config_descriptor(),
     str_lang: StringDescriptorBuf::lang_ids(),
     str_manufacturer: StringDescriptorBuf::from_ascii("Klipper"),
     str_product: StringDescriptorBuf::from_ascii("FOCI"),
@@ -718,6 +722,10 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         let d = &mut *DESCRIPTORS.get();
         d.device = descriptors::build_device_descriptor(vid, pid);
         d.config = descriptors::build_config_descriptor();
+        #[cfg(feature = "trace")]
+        {
+            d.trace_config = descriptors::build_trace_config_descriptor();
+        }
         d.str_lang = StringDescriptorBuf::lang_ids();
         d.str_manufacturer = StringDescriptorBuf::from_ascii(manufacturer);
         d.str_product = StringDescriptorBuf::from_ascii(product);
@@ -726,7 +734,14 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         // Build descriptor lookup table using raw pointers into `DESCRIPTORS`
         // so every entry points to storage with static lifetime.
         let device_ptr = (&raw const d.device) as *const u8;
+        #[cfg(not(feature = "trace"))]
         let config_ptr = (&raw const d.config) as *const u8;
+        #[cfg(not(feature = "trace"))]
+        let config_size = core::mem::size_of::<CdcConfigDescriptor>() as u8;
+        #[cfg(feature = "trace")]
+        let config_ptr = (&raw const d.trace_config) as *const u8;
+        #[cfg(feature = "trace")]
+        let config_size = core::mem::size_of::<descriptors::CdcTraceConfigDescriptor>() as u8;
         let (lang_ptr, lang_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_lang);
         let (mfr_ptr, mfr_len) =
             StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_manufacturer);
@@ -746,7 +761,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
             w_value: (descriptors::USB_DT_CONFIG as u16) << 8,
             w_index: 0,
             data: config_ptr,
-            size: core::mem::size_of::<CdcConfigDescriptor>() as u8,
+            size: config_size,
         };
         idx += 1;
 

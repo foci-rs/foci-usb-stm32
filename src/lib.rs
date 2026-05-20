@@ -37,6 +37,14 @@ pub mod ep {
 
     /// Bulk IN endpoint packet size.
     pub const EP_BULK_IN_SIZE: usize = 64;
+
+    /// Trace bulk IN endpoint number.
+    #[cfg(feature = "trace")]
+    pub const EP_TRACE_IN: usize = 4;
+
+    /// Trace bulk IN endpoint packet size.
+    #[cfg(feature = "trace")]
+    pub const EP_TRACE_IN_SIZE: usize = 64;
 }
 
 /// USB peripheral configuration.
