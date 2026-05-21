@@ -41,8 +41,12 @@ pub mod ep {
     pub const EP_BULK_IN_SIZE: usize = 64;
 
     /// Trace bulk IN endpoint number.
+    ///
+    /// Reuse endpoint number 2 in the opposite direction from CDC bulk OUT.
+    /// STM32 OTG has separate IN and OUT endpoint registers; this keeps the
+    /// trace interface within the F407's endpoint-number range.
     #[cfg(feature = "trace")]
-    pub const EP_TRACE_IN: usize = 4;
+    pub const EP_TRACE_IN: usize = EP_BULK_OUT;
 
     /// Trace bulk IN endpoint packet size.
     #[cfg(feature = "trace")]

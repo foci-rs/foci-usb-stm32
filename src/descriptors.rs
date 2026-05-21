@@ -480,10 +480,11 @@ mod trace_descriptor_tests {
 
     #[cfg(feature = "trace")]
     #[test]
-    fn trace_config_adds_vendor_bulk_in_after_cdc() {
+    fn trace_config_reuses_cdc_out_endpoint_number_as_vendor_bulk_in() {
         let cfg = build_trace_config_descriptor();
         let data = bytes(&cfg);
         let total_length = cfg.config.w_total_length;
+        let cdc_out_ep_address = cfg.ep2.b_endpoint_address;
         let trace_ep_address = cfg.trace_ep.b_endpoint_address;
 
         assert_eq!(cfg.config.b_num_interfaces, 3);
@@ -492,6 +493,7 @@ mod trace_descriptor_tests {
         assert_eq!(cfg.iface1.b_interface_number, 1);
         assert_eq!(cfg.trace_iface.b_interface_number, 2);
         assert_eq!(cfg.trace_iface.b_interface_class, USB_CLASS_VENDOR_SPECIFIC);
-        assert_eq!(trace_ep_address, crate::ep::EP_TRACE_IN as u8 | USB_DIR_IN);
+        assert_eq!(cdc_out_ep_address, crate::ep::EP_BULK_OUT as u8);
+        assert_eq!(trace_ep_address, crate::ep::EP_BULK_OUT as u8 | USB_DIR_IN);
     }
 }
