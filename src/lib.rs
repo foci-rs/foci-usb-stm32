@@ -136,8 +136,8 @@ pub fn tx_write(data: &[u8]) {
 
 /// Write one packet to the trace bulk IN endpoint.
 ///
-/// Returns the number of bytes accepted by the USB controller, or -1 if EP4 is
-/// busy and the caller should retry later.
+/// Returns the number of bytes accepted by the USB controller, or -1 if the
+/// trace endpoint is busy and the caller should retry later.
 #[cfg(feature = "trace")]
 pub fn trace_write(data: &[u8]) -> i8 {
     trace::send_trace_in(data)

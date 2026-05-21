@@ -10,8 +10,8 @@ pub fn trace_chunk_len(data: &[u8]) -> usize {
 
 /// Send at most one full-speed trace bulk packet.
 ///
-/// Returns the number of bytes accepted by the USB controller, or -1 if EP4 is
-/// busy and the caller should retry later.
+/// Returns the number of bytes accepted by the USB controller, or -1 if the
+/// trace endpoint is busy and the caller should retry later.
 pub fn send_trace_in(data: &[u8]) -> i8 {
     let len = trace_chunk_len(data);
     otg::usb_send_trace_in(&data[..len])

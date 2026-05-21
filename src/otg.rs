@@ -530,8 +530,29 @@ pub fn usb_send_trace_in(data: &[u8]) -> i8 {
         return -1;
     }
     let ret = fifo_write_packet(EP_TRACE_IN, &data[..len]);
+    if trace_packet_needs_completion_wake(ret) {
+        let msk = readl(reg(DAINTMSK));
+        writel(reg(DAINTMSK), msk | (1 << EP_TRACE_IN));
+    }
     usb_irq_enable();
     ret
+}
+
+#[cfg(feature = "trace")]
+fn trace_packet_needs_completion_wake(write_result: i8) -> bool {
+    write_result > 0
+}
+
+#[cfg(test)]
+mod trace_tests {
+    #[test]
+    #[cfg(feature = "trace")]
+    fn accepted_trace_packet_requires_in_completion_wake() {
+        assert!(super::trace_packet_needs_completion_wake(1));
+        assert!(super::trace_packet_needs_completion_wake(64));
+        assert!(!super::trace_packet_needs_completion_wake(0));
+        assert!(!super::trace_packet_needs_completion_wake(-1));
+    }
 }
 
 /// Read data from EP0 (non-setup data phase).
