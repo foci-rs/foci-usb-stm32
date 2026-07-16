@@ -7,7 +7,10 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
+use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+use cortex_m::interrupt::{self, Mutex};
 
 use crate::descriptors::{
     self, CdcConfigDescriptor, DescriptorEntry, StringDescriptorBuf, UsbCdcLineCoding,
@@ -68,12 +71,15 @@ struct TxBuffer {
     pos: u8,
 }
 
-/// Bulk IN TX state. All accesses occur in the single protocol-task
-/// context; the USB ISR only sets the bulk-in wake flag.
-static TX: RacyCell<TxBuffer> = RacyCell::new(TxBuffer {
+/// Bulk IN TX state shared by reply-producing tasks and the USB drain task.
+///
+/// The USB ISR only sets the bulk-in wake flag. Task-context writers and the
+/// drain can preempt each other, so every buffer access uses one brief global
+/// critical section.
+static TX: Mutex<RefCell<TxBuffer>> = Mutex::new(RefCell::new(TxBuffer {
     buf: [0u8; TX_BUF_SIZE],
     pos: 0,
-});
+}));
 
 /// Write data to the USB transmit buffer. This is the primary API for
 /// sending protocol responses over USB.
@@ -81,24 +87,22 @@ static TX: RacyCell<TxBuffer> = RacyCell::new(TxBuffer {
 /// If the buffer is full, the data is silently dropped (matching Klipper
 /// behavior in console_sendf when buffer is full).
 ///
-/// # Safety
-///
-/// Must not be called from the USB ISR (reentrant access).
+/// Must not be called from the USB ISR.
 pub fn tx_write(data: &[u8]) {
-    // SAFETY: `TX` is only touched from the protocol RTIC task context.
-    // The ISR only sets the bulk-in wake flag; it does not read or write
-    // the buffer.
-    unsafe {
-        let tx = &mut *TX.get();
+    let written = interrupt::free(|cs| {
+        let mut tx = TX.borrow(cs).borrow_mut();
         let tpos = tx.pos as usize;
         if tpos + data.len() > TX_BUF_SIZE {
             // Not enough space — drop (matches Klipper's console_sendf).
-            return;
+            return false;
         }
         tx.buf[tpos..tpos + data.len()].copy_from_slice(data);
         tx.pos = (tpos + data.len()) as u8;
+        true
+    });
+    if written {
+        notify_bulk_in();
     }
-    notify_bulk_in();
 }
 
 /// Process bulk IN transmissions. Matches `usb_bulk_in_task()` in usb_cdc.c.
@@ -106,13 +110,11 @@ fn bulk_in_task() {
     if !check_bulk_in_wake() {
         return;
     }
-    // SAFETY: `TX` is only touched from the protocol RTIC task context.
-    // The ISR only sets the bulk-in wake flag.
-    unsafe {
-        let tx = &mut *TX.get();
+    let needs_more = interrupt::free(|cs| {
+        let mut tx = TX.borrow(cs).borrow_mut();
         let tpos = tx.pos as usize;
         if tpos == 0 {
-            return;
+            return false;
         }
         let mut max_tpos = tpos;
         if max_tpos > EP_BULK_IN_SIZE {
@@ -123,7 +125,7 @@ fn bulk_in_task() {
         }
         let ret = otg::usb_send_bulk_in(&tx.buf[..max_tpos]);
         if ret <= 0 {
-            return;
+            return false;
         }
         let ret = ret as usize;
         let needcopy = tpos - ret;
@@ -133,9 +135,12 @@ fn bulk_in_task() {
             for i in 0..needcopy {
                 tx.buf[i] = tx.buf[src + i];
             }
-            notify_bulk_in();
         }
         tx.pos = needcopy as u8;
+        needcopy > 0
+    });
+    if needs_more {
+        notify_bulk_in();
     }
 }
 
@@ -808,7 +813,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
             size: 0,
             flags: 0,
         };
-        (*TX.get()).pos = 0;
+        interrupt::free(|cs| TX.borrow(cs).borrow_mut().pos = 0);
         (*RX.get()).pos = 0;
         *LINE.get() = LineState {
             coding: UsbCdcLineCoding::default(),
@@ -853,6 +858,18 @@ pub fn poll() -> bool {
     ep0_task();
     bulk_in_task();
     bulk_out_task()
+}
+
+#[cfg(test)]
+mod tx_tests {
+    use super::*;
+
+    fn assert_synchronized_tx(_tx: &cortex_m::interrupt::Mutex<core::cell::RefCell<TxBuffer>>) {}
+
+    #[test]
+    fn transmit_buffer_enforces_cross_task_serialization() {
+        assert_synchronized_tx(&TX);
+    }
 }
 
 /// Check if the USB device is configured (endpoints active).
