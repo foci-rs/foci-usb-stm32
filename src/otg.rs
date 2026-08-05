@@ -543,18 +543,6 @@ fn trace_packet_needs_completion_wake(write_result: i8) -> bool {
     write_result > 0
 }
 
-#[cfg(test)]
-mod trace_tests {
-    #[test]
-    #[cfg(feature = "trace")]
-    fn accepted_trace_packet_requires_in_completion_wake() {
-        assert!(super::trace_packet_needs_completion_wake(1));
-        assert!(super::trace_packet_needs_completion_wake(64));
-        assert!(!super::trace_packet_needs_completion_wake(0));
-        assert!(!super::trace_packet_needs_completion_wake(-1));
-    }
-}
-
 /// Read data from EP0 (non-setup data phase).
 /// Returns bytes read, -1 if no data, -2 if transfer interrupted.
 pub fn usb_read_ep0(data: &mut [u8], max_len: u8) -> i8 {
@@ -921,4 +909,16 @@ pub fn is_bulk_in_configured() -> bool {
     }
     let ctl = readl(base + diepctl(EP_BULK_IN));
     ctl & DEPCTL_USBAEP != 0
+}
+
+#[cfg(test)]
+mod trace_tests {
+    #[test]
+    #[cfg(feature = "trace")]
+    fn accepted_trace_packet_requires_in_completion_wake() {
+        assert!(super::trace_packet_needs_completion_wake(1));
+        assert!(super::trace_packet_needs_completion_wake(64));
+        assert!(!super::trace_packet_needs_completion_wake(0));
+        assert!(!super::trace_packet_needs_completion_wake(-1));
+    }
 }

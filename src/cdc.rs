@@ -860,18 +860,6 @@ pub fn poll() -> bool {
     bulk_out_task()
 }
 
-#[cfg(test)]
-mod tx_tests {
-    use super::*;
-
-    fn assert_synchronized_tx(_tx: &cortex_m::interrupt::Mutex<core::cell::RefCell<TxBuffer>>) {}
-
-    #[test]
-    fn transmit_buffer_enforces_cross_task_serialization() {
-        assert_synchronized_tx(&TX);
-    }
-}
-
 /// Check if the USB device is configured (endpoints active).
 /// Returns true after the host sends SET_CONFIGURATION.
 pub fn is_configured() -> bool {
@@ -884,4 +872,16 @@ pub fn shutdown() {
     notify_bulk_in();
     notify_bulk_out();
     notify_ep0();
+}
+
+#[cfg(test)]
+mod tx_tests {
+    use super::*;
+
+    fn assert_synchronized_tx(_tx: &cortex_m::interrupt::Mutex<core::cell::RefCell<TxBuffer>>) {}
+
+    #[test]
+    fn transmit_buffer_enforces_cross_task_serialization() {
+        assert_synchronized_tx(&TX);
+    }
 }
