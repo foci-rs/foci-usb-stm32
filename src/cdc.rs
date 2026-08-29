@@ -8,7 +8,7 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cortex_m::interrupt::{self, Mutex};
 
@@ -81,11 +81,22 @@ static TX: Mutex<RefCell<TxBuffer>> = Mutex::new(RefCell::new(TxBuffer {
     pos: 0,
 }));
 
+/// Count of `tx_write` calls that silently dropped a frame because it did
+/// not fit in the remaining TX staging capacity. Diagnostic only -- read
+/// back via `tx_buffer_full_drop_count`, not logged live at this call site.
+static TX_BUFFER_FULL_DROPS: AtomicU32 = AtomicU32::new(0);
+
+/// Current count of frames dropped by `tx_write`'s buffer-full path.
+pub fn tx_buffer_full_drop_count() -> u32 {
+    TX_BUFFER_FULL_DROPS.load(Ordering::Relaxed)
+}
+
 /// Write data to the USB transmit buffer. This is the primary API for
 /// sending protocol responses over USB.
 ///
 /// If the buffer is full, the data is silently dropped (matching Klipper
-/// behavior in console_sendf when buffer is full).
+/// behavior in console_sendf when buffer is full). Each drop still counts
+/// toward `tx_buffer_full_drop_count`.
 ///
 /// Must not be called from the USB ISR.
 pub fn tx_write(data: &[u8]) {
@@ -94,6 +105,7 @@ pub fn tx_write(data: &[u8]) {
         let tpos = tx.pos as usize;
         if tpos + data.len() > TX_BUF_SIZE {
             // Not enough space — drop (matches Klipper's console_sendf).
+            TX_BUFFER_FULL_DROPS.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         tx.buf[tpos..tpos + data.len()].copy_from_slice(data);
@@ -884,4 +896,13 @@ mod tx_tests {
     fn transmit_buffer_enforces_cross_task_serialization() {
         assert_synchronized_tx(&TX);
     }
+
+    // No host test calls tx_write: it's wrapped in cortex_m::interrupt::free,
+    // whose disable/enable primitives have no host-target definition. Any
+    // test that reaches that call path fails to link (undefined symbols
+    // __cpsid/__cpsie/__primask_r), not merely to behave incorrectly. That
+    // dead-code-strips cleanly today only because nothing in the existing
+    // suite calls tx_write either -- verified on the CDC TX path, this is a
+    // target-only-testable boundary, same class as board_init.rs's MMIO
+    // writes.
 }
