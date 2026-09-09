@@ -208,6 +208,12 @@ pub fn usb_irq_disable() {
     // `cortex_m::peripheral::NVIC::mask()` is safe to call with any valid
     // IRQ number. `USB_IRQ` is set once during init and never changed.
     cortex_m::peripheral::NVIC::mask(IrqNr(USB_IRQ.load(Ordering::Relaxed)));
+    // Writing NVIC_ICER is posted; without these barriers the handler can
+    // still take the core after this returns, leaving the caller's critical
+    // section open. CMSIS's NVIC_DisableIRQ, which the reference driver uses,
+    // ends with the same DSB/ISB pair.
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
 }
 
 /// Enable the USB interrupt.
