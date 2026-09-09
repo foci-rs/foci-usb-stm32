@@ -400,7 +400,12 @@ pub fn fifo_read_packet(dest: Option<&mut [u8]>, max_len: u8) -> i8 {
 fn enable_rx_endpoint(ep: usize) {
     let ctl = readl(reg(doepctl(ep)));
     if ctl & DEPCTL_EPENA == 0 || ctl & DEPCTL_NAKSTS != 0 {
-        writel(reg(doeptsiz(ep)), 64 | (1 << DEPTSIZ_PKTCNT_POS));
+        let stupcnt = if ep == 0 {
+            3 << DOEPTSIZ_STUPCNT_POS
+        } else {
+            0
+        };
+        writel(reg(doeptsiz(ep)), 64 | (1 << DEPTSIZ_PKTCNT_POS) | stupcnt);
         writel(reg(doepctl(ep)), ctl | DEPCTL_EPENA | DEPCTL_CNAK);
     }
 }
@@ -881,7 +886,7 @@ pub unsafe fn init(config: &OtgConfig) {
         writel(reg(diepctl(0)), mpsize_ep0 | DEPCTL_SNAK);
         writel(
             reg(doeptsiz(0)),
-            64 | (1 << DOEPTSIZ_STUPCNT_POS) | (1 << DEPTSIZ_PKTCNT_POS),
+            64 | (3 << DOEPTSIZ_STUPCNT_POS) | (1 << DEPTSIZ_PKTCNT_POS),
         );
         writel(reg(doepctl(0)), mpsize_ep0 | DEPCTL_EPENA | DEPCTL_SNAK);
 
