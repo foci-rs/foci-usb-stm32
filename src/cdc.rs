@@ -363,6 +363,19 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
             }
             return;
         }
+        if ret == -2 {
+            // A new SETUP packet arrived while this transfer was in flight.
+            // The host has abandoned it, so drop it and let the state machine
+            // service the new request; stalling here would fail a control
+            // transfer the host is no longer waiting on, and the host would
+            // retry into the same state indefinitely.
+            // SAFETY: `XFER` is only touched from the EP0 task context.
+            unsafe {
+                (*XFER.get()).flags = 0;
+            }
+            notify_ep0();
+            return;
+        }
         // Error
         usb_do_stall();
         return;
