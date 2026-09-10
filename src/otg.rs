@@ -127,12 +127,14 @@ const DOEPTSIZ_STUPCNT_POS: u32 = 29;
 
 // DIEPINT
 const DIEPINT_XFRC: u32 = 1 << 0;
+const DIEPINT_TOC: u32 = 1 << 3;
 
 // DOEPINT
 const DOEPINT_STUP: u32 = 1 << 3;
 
 // DIEPMSK
 const DIEPMSK_XFRCM: u32 = 1 << 0;
+const DIEPMSK_TOM: u32 = 1 << 3;
 
 // GRXSTSP fields
 const GRXSTSP_EPNUM_MSK: u32 = 0x0F;
@@ -578,6 +580,18 @@ pub fn usb_read_ep0(data: &mut [u8], max_len: u8) -> i8 {
     ret
 }
 
+/// Disable and flush a pending TX packet on EP0 IN, if one is in flight.
+/// Leaves the endpoint disabled; the next `fifo_write_packet` re-enables it.
+fn flush_ep0_in() {
+    let ctl = readl(reg(diepctl(0)));
+    if ctl & DEPCTL_EPENA != 0 {
+        writel(reg(diepctl(0)), ctl | DEPCTL_EPDIS | DEPCTL_SNAK);
+        while readl(reg(diepctl(0))) & DEPCTL_EPENA != 0 {}
+        writel(reg(GRSTCTL), GRSTCTL_TXFFLSH);
+        while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
+    }
+}
+
 /// Read a SETUP packet from EP0.
 /// Returns the size of the setup packet, or -1 if not ready.
 pub fn usb_read_ep0_setup(data: &mut [u8], max_len: u8) -> i8 {
@@ -613,14 +627,8 @@ pub fn usb_read_ep0_setup(data: &mut [u8], max_len: u8) -> i8 {
         }
     }
 
-    // Flush any pending TX packets on EP0 IN
-    let ctl = readl(reg(diepctl(0)));
-    if ctl & DEPCTL_EPENA != 0 {
-        writel(reg(diepctl(0)), ctl | DEPCTL_EPDIS | DEPCTL_SNAK);
-        while readl(reg(diepctl(0))) & DEPCTL_EPENA != 0 {}
-        writel(reg(GRSTCTL), GRSTCTL_TXFFLSH);
-        while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
-    }
+    // Flush any pending TX packet on EP0 IN
+    flush_ep0_in();
 
     enable_rx_endpoint(0);
     writel(reg(doepint(0)), DOEPINT_STUP);
@@ -771,6 +779,35 @@ pub fn usb_set_configure() {
 // IRQ handler (port of OTG_FS_IRQHandler in usbotg.c)
 // ----------------------------------------------------------------
 
+/// Outcome of inspecting EP0's `DIEPINT` after its IN-endpoint interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ep0InEvent {
+    /// `XFRC` set: transfer completed normally.
+    Complete,
+    /// `TOC` set: the core gave up waiting on firmware to queue data before
+    /// an IN token arrived; the endpoint must be recovered before any retry
+    /// can be queued.
+    Timeout,
+    /// Neither flag of interest set (spurious wake, or a different cause).
+    None,
+}
+
+/// Decide what a pending EP0 IN interrupt means from its raw `DIEPINT` bits.
+///
+/// `TOC` takes precedence over `XFRC`: a failed attempt can leave `TOC`
+/// latched alongside a later `XFRC` from a subsequent successful one before
+/// firmware next reads the register, and the failed attempt still needs its
+/// endpoint state recovered regardless of what happened after it.
+fn ep0_in_event(diepint: u32) -> Ep0InEvent {
+    if diepint & DIEPINT_TOC != 0 {
+        Ep0InEvent::Timeout
+    } else if diepint & DIEPINT_XFRC != 0 {
+        Ep0InEvent::Complete
+    } else {
+        Ep0InEvent::None
+    }
+}
+
 /// USB OTG IRQ handler. Must be called from the interrupt vector.
 pub fn irq_handler() {
     let sts = readl(reg(GINTSTS));
@@ -795,6 +832,15 @@ pub fn irq_handler() {
         let pend = daint & msk;
         writel(reg(DAINTMSK), msk & !daint);
         if pend & (1 << 0) != 0 {
+            // A timed-out control IN never sets XFRC and leaves EPENA
+            // latched, so usb_send_ep0's busy check would wait forever on a
+            // completion that will not come. Recover the endpoint so the
+            // retry ep0_task's wake triggers can queue the same
+            // (unconsumed) packet again.
+            if ep0_in_event(readl(reg(diepint(0)))) == Ep0InEvent::Timeout {
+                writel(reg(diepint(0)), DIEPINT_TOC);
+                flush_ep0_in();
+            }
             cdc::notify_ep0();
         }
         if pend & (1 << EP_BULK_IN) != 0 {
@@ -890,8 +936,10 @@ pub unsafe fn init(config: &OtgConfig) {
         );
         writel(reg(doepctl(0)), mpsize_ep0 | DEPCTL_EPENA | DEPCTL_SNAK);
 
-        // Enable interrupts
-        writel(reg(DIEPMSK), DIEPMSK_XFRCM);
+        // Enable interrupts. TOM (in addition to XFRCM) lets a control-IN
+        // timeout on EP0 wake the ISR instead of stalling forever -- see
+        // ep0_in_event() and its use in irq_handler().
+        writel(reg(DIEPMSK), DIEPMSK_XFRCM | DIEPMSK_TOM);
         writel(reg(GINTMSK), GINTMSK_RXFLVLM | GINTMSK_IEPINT);
         writel(reg(GAHBCFG), GAHBCFG_GINT);
 
@@ -931,5 +979,37 @@ mod trace_tests {
         assert!(super::trace_packet_needs_completion_wake(64));
         assert!(!super::trace_packet_needs_completion_wake(0));
         assert!(!super::trace_packet_needs_completion_wake(-1));
+    }
+}
+
+#[cfg(test)]
+mod ep0_in_tests {
+    use super::{DIEPINT_TOC, DIEPINT_XFRC, Ep0InEvent, ep0_in_event};
+
+    #[test]
+    fn xfrc_alone_is_complete() {
+        assert_eq!(ep0_in_event(DIEPINT_XFRC), Ep0InEvent::Complete);
+    }
+
+    #[test]
+    fn toc_alone_is_timeout() {
+        assert_eq!(ep0_in_event(DIEPINT_TOC), Ep0InEvent::Timeout);
+    }
+
+    #[test]
+    fn toc_takes_precedence_over_xfrc() {
+        // The core can latch TOC on an earlier failed attempt and XFRC on a
+        // later successful one before firmware next reads DIEPINT; the failed
+        // attempt still needs its endpoint state recovered, so timeout wins.
+        assert_eq!(
+            ep0_in_event(DIEPINT_TOC | DIEPINT_XFRC),
+            Ep0InEvent::Timeout
+        );
+    }
+
+    #[test]
+    fn neither_flag_is_none() {
+        assert_eq!(ep0_in_event(0), Ep0InEvent::None);
+        assert_eq!(ep0_in_event(1 << 4), Ep0InEvent::None);
     }
 }
