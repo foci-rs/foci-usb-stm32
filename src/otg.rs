@@ -865,6 +865,9 @@ pub fn irq_handler() {
             notify_wake();
         }
     }
+
+    // Complete peripheral writes before the board wrapper wakes the USB task.
+    cortex_m::asm::dmb();
 }
 
 // ----------------------------------------------------------------
@@ -1011,5 +1014,47 @@ mod ep0_in_tests {
     fn neither_flag_is_none() {
         assert_eq!(ep0_in_event(0), Ep0InEvent::None);
         assert_eq!(ep0_in_event(1 << 4), Ep0InEvent::None);
+    }
+}
+
+#[cfg(test)]
+mod source_contract_tests {
+    fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let signature_start = source
+            .find(signature)
+            .expect("function signature must exist");
+        let body_start = source[signature_start..]
+            .find('{')
+            .map(|offset| signature_start + offset)
+            .expect("function body must open");
+        let mut depth = 0usize;
+
+        for (offset, byte) in source.as_bytes()[body_start..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start + 1..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        panic!("function body must close");
+    }
+
+    #[test]
+    fn irq_handler_ends_with_data_memory_barrier() {
+        let source = include_str!("otg.rs");
+        let body = function_body(source, "pub fn irq_handler()");
+        let terminal_statement = body
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("//"));
+
+        assert_eq!(terminal_statement, Some("cortex_m::asm::dmb();"));
     }
 }
