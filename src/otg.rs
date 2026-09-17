@@ -676,6 +676,21 @@ pub fn usb_stall_ep0() {
     usb_irq_enable();
 }
 
+/// Clear a halted non-control endpoint on behalf of
+/// `CLEAR_FEATURE(ENDPOINT_HALT)`. Also resets the data toggle to DATA0,
+/// which USB 2.0 section 9.4.5 requires alongside the halt clear.
+pub fn usb_clear_endpoint_halt(ep: usize, is_in: bool) {
+    usb_irq_disable();
+    let addr = if is_in {
+        reg(diepctl(ep))
+    } else {
+        reg(doepctl(ep))
+    };
+    let ctl = readl(addr);
+    writel(addr, (ctl & !DEPCTL_STALL) | DEPCTL_SD0PID);
+    usb_irq_enable();
+}
+
 /// Set the USB device address.
 pub fn usb_set_address(addr: u8) {
     let dcfg = readl(reg(DCFG));
@@ -1056,5 +1071,16 @@ mod source_contract_tests {
             .find(|line| !line.is_empty() && !line.starts_with("//"));
 
         assert_eq!(terminal_statement, Some("cortex_m::asm::dmb();"));
+    }
+
+    #[test]
+    fn clear_endpoint_halt_clears_stall_and_resets_data_toggle() {
+        let source = include_str!("otg.rs");
+        let body = function_body(source, "pub fn usb_clear_endpoint_halt(");
+        assert!(body.contains("!DEPCTL_STALL"), "STALL bit must be cleared");
+        assert!(
+            body.contains("DEPCTL_SD0PID"),
+            "data toggle must reset to DATA0"
+        );
     }
 }

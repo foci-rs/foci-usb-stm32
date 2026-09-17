@@ -16,7 +16,9 @@ use crate::descriptors::{
     self, CdcConfigDescriptor, DescriptorEntry, StringDescriptorBuf, UsbCdcLineCoding,
     UsbCtrlRequest, UsbDeviceDescriptor,
 };
-use crate::ep::{EP_BULK_IN_SIZE, EP_BULK_OUT_SIZE, EP0_SIZE};
+#[cfg(feature = "trace")]
+use crate::ep::EP_TRACE_IN;
+use crate::ep::{EP_ACM, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE, EP0_SIZE};
 use crate::otg;
 use crate::sync::RacyCell;
 
@@ -580,6 +582,49 @@ fn usb_req_set_configuration(req: &UsbCtrlRequest) {
     usb_do_xfer(core::ptr::null_mut(), 0, UX_SEND);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HaltTarget {
+    In(usize),
+    Out(usize),
+}
+
+fn clear_endpoint_halt_target(req: &UsbCtrlRequest) -> Option<HaltTarget> {
+    if req.b_request_type != descriptors::USB_RECIP_ENDPOINT
+        || req.b_request != descriptors::USB_REQ_CLEAR_FEATURE
+        || req.w_value != descriptors::USB_FEATURE_ENDPOINT_HALT
+        || req.w_length != 0
+    {
+        return None;
+    }
+    let address = req.w_index;
+    if address & !(descriptors::USB_DIR_IN as u16 | 0x0F) != 0 {
+        return None;
+    }
+    let is_in = address & descriptors::USB_DIR_IN as u16 != 0;
+    let ep = (address & 0x0F) as usize;
+    match (ep, is_in) {
+        (EP_BULK_IN, true) | (EP_ACM, true) => Some(HaltTarget::In(ep)),
+        #[cfg(feature = "trace")]
+        (EP_TRACE_IN, true) => Some(HaltTarget::In(ep)),
+        (EP_BULK_OUT, false) => Some(HaltTarget::Out(ep)),
+        _ => None,
+    }
+}
+
+fn usb_req_clear_feature(req: &UsbCtrlRequest) {
+    let Some(target) = clear_endpoint_halt_target(req) else {
+        usb_do_stall();
+        return;
+    };
+    match target {
+        HaltTarget::In(ep) => otg::usb_clear_endpoint_halt(ep, true),
+        HaltTarget::Out(ep) => otg::usb_clear_endpoint_halt(ep, false),
+    }
+    notify_bulk_in();
+    notify_bulk_out();
+    usb_do_xfer(core::ptr::null_mut(), 0, UX_SEND);
+}
+
 // Katapult/CanBoot bootloader constants (from Klipper armcm_reset.c).
 const KATAPULT_BOOT_ADDRESS: u32 = 0x0800_0000;
 const KATAPULT_SIGNATURE: u64 = 0x2174_6f6f_426e_6143; // "CanBoot!"
@@ -703,6 +748,7 @@ fn usb_state_ready() {
     let req: UsbCtrlRequest = unsafe { core::ptr::read_unaligned(req_buf.as_ptr().cast()) };
 
     match req.b_request {
+        descriptors::USB_REQ_CLEAR_FEATURE => usb_req_clear_feature(&req),
         descriptors::USB_REQ_GET_DESCRIPTOR => usb_req_get_descriptor(&req),
         descriptors::USB_REQ_SET_ADDRESS => usb_req_set_address(&req),
         descriptors::USB_REQ_SET_CONFIGURATION => usb_req_set_configuration(&req),
@@ -918,4 +964,83 @@ mod tx_tests {
     // suite calls tx_write either -- verified on the CDC TX path, this is a
     // target-only-testable boundary, same class as board_init.rs's MMIO
     // writes.
+}
+
+#[cfg(test)]
+mod clear_feature_tests {
+    use super::{HaltTarget, clear_endpoint_halt_target};
+    use crate::descriptors::{USB_DIR_IN, UsbCtrlRequest};
+    use crate::ep::{EP_ACM, EP_BULK_IN, EP_BULK_OUT};
+
+    fn clear_halt(w_index: u16) -> UsbCtrlRequest {
+        UsbCtrlRequest {
+            b_request_type: 0x02,
+            b_request: 0x01,
+            w_value: 0,
+            w_index,
+            w_length: 0,
+        }
+    }
+
+    #[test]
+    fn bulk_in_address_resolves_to_in_endpoint() {
+        let req = clear_halt(EP_BULK_IN as u16 | USB_DIR_IN as u16);
+        assert_eq!(
+            clear_endpoint_halt_target(&req),
+            Some(HaltTarget::In(EP_BULK_IN))
+        );
+    }
+
+    #[test]
+    fn bulk_out_address_resolves_to_out_endpoint() {
+        let req = clear_halt(EP_BULK_OUT as u16);
+        assert_eq!(
+            clear_endpoint_halt_target(&req),
+            Some(HaltTarget::Out(EP_BULK_OUT))
+        );
+    }
+
+    #[test]
+    fn acm_notification_address_resolves_to_in_endpoint() {
+        let req = clear_halt(EP_ACM as u16 | USB_DIR_IN as u16);
+        assert_eq!(
+            clear_endpoint_halt_target(&req),
+            Some(HaltTarget::In(EP_ACM))
+        );
+    }
+
+    #[test]
+    fn other_feature_selector_is_rejected() {
+        let mut req = clear_halt(EP_BULK_IN as u16 | USB_DIR_IN as u16);
+        req.w_value = 1;
+        assert_eq!(clear_endpoint_halt_target(&req), None);
+    }
+
+    #[test]
+    fn non_endpoint_recipient_is_rejected() {
+        let mut req = clear_halt(EP_BULK_IN as u16 | USB_DIR_IN as u16);
+        req.b_request_type = 0x00;
+        assert_eq!(clear_endpoint_halt_target(&req), None);
+    }
+
+    #[test]
+    fn unconfigured_endpoint_is_rejected() {
+        assert_eq!(clear_endpoint_halt_target(&clear_halt(0x85)), None);
+        assert_eq!(clear_endpoint_halt_target(&clear_halt(0x04)), None);
+    }
+
+    #[test]
+    fn control_endpoint_is_rejected() {
+        assert_eq!(clear_endpoint_halt_target(&clear_halt(0x80)), None);
+        assert_eq!(clear_endpoint_halt_target(&clear_halt(0x00)), None);
+    }
+
+    #[test]
+    fn ready_state_dispatches_clear_feature() {
+        let source = include_str!("cdc.rs");
+        assert!(
+            source.contains("descriptors::USB_REQ_CLEAR_FEATURE => usb_req_clear_feature(&req),"),
+            "usb_state_ready must dispatch CLEAR_FEATURE instead of stalling it"
+        );
+    }
 }
