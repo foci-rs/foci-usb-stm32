@@ -15,13 +15,16 @@ use crate::ep::{EP_TRACE_IN, EP_TRACE_IN_SIZE};
 pub const USB_DIR_OUT: u8 = 0x00;
 pub const USB_DIR_IN: u8 = 0x80;
 
+/// `bmRequestType` for a host-to-device standard request addressed to an endpoint.
 pub const USB_RECIP_ENDPOINT: u8 = 0x02;
 
+/// Standard `CLEAR_FEATURE` request code (USB 2.0 table 9-4).
 pub const USB_REQ_CLEAR_FEATURE: u8 = 0x01;
 pub const USB_REQ_GET_DESCRIPTOR: u8 = 0x06;
 pub const USB_REQ_SET_ADDRESS: u8 = 0x05;
 pub const USB_REQ_SET_CONFIGURATION: u8 = 0x09;
 
+/// `ENDPOINT_HALT` feature selector (USB 2.0 table 9-6).
 pub const USB_FEATURE_ENDPOINT_HALT: u16 = 0x0000;
 
 pub const USB_DT_DEVICE: u8 = 0x01;
