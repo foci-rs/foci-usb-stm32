@@ -1013,6 +1013,21 @@ mod clear_feature_tests {
         );
     }
 
+    #[cfg(feature = "trace")]
+    #[test]
+    fn trace_in_shares_endpoint_number_with_bulk_out() {
+        use crate::ep::EP_TRACE_IN;
+        let req = clear_halt(EP_TRACE_IN as u16 | USB_DIR_IN as u16);
+        assert_eq!(
+            clear_endpoint_halt_target(&req),
+            Some(HaltTarget::In(EP_TRACE_IN))
+        );
+        assert_eq!(
+            clear_endpoint_halt_target(&clear_halt(EP_BULK_OUT as u16)),
+            Some(HaltTarget::Out(EP_BULK_OUT))
+        );
+    }
+
     #[test]
     fn other_feature_selector_is_rejected() {
         let mut req = clear_halt(EP_BULK_IN as u16 | USB_DIR_IN as u16);
