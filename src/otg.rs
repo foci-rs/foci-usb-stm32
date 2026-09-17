@@ -676,19 +676,35 @@ pub fn usb_stall_ep0() {
     usb_irq_enable();
 }
 
+fn halt_clear_control_value(ctl: u32) -> Option<u32> {
+    if ctl & DEPCTL_USBAEP == 0 {
+        return None;
+    }
+    Some((ctl & !DEPCTL_STALL) | DEPCTL_SD0PID)
+}
+
 /// Clear a halted non-control endpoint on behalf of
 /// `CLEAR_FEATURE(ENDPOINT_HALT)`. Also resets the data toggle to DATA0,
 /// which USB 2.0 section 9.4.5 requires alongside the halt clear.
-pub fn usb_clear_endpoint_halt(ep: usize, is_in: bool) {
+///
+/// Returns `false`, writing nothing, when the endpoint is not active in the
+/// current configuration; the request is only valid in the Configured state.
+pub fn usb_clear_endpoint_halt(ep: usize, is_in: bool) -> bool {
     usb_irq_disable();
     let addr = if is_in {
         reg(diepctl(ep))
     } else {
         reg(doepctl(ep))
     };
-    let ctl = readl(addr);
-    writel(addr, (ctl & !DEPCTL_STALL) | DEPCTL_SD0PID);
+    let cleared = match halt_clear_control_value(readl(addr)) {
+        Some(ctl) => {
+            writel(addr, ctl);
+            true
+        }
+        None => false,
+    };
     usb_irq_enable();
+    cleared
 }
 
 /// Set the USB device address.
@@ -1072,15 +1088,36 @@ mod source_contract_tests {
 
         assert_eq!(terminal_statement, Some("cortex_m::asm::dmb();"));
     }
+}
+
+#[cfg(test)]
+mod halt_clear_tests {
+    use super::{
+        DEPCTL_EPENA, DEPCTL_SD0PID, DEPCTL_STALL, DEPCTL_USBAEP, halt_clear_control_value,
+    };
+
+    const MPSIZ_64: u32 = 64;
 
     #[test]
-    fn clear_endpoint_halt_clears_stall_and_resets_data_toggle() {
-        let source = include_str!("otg.rs");
-        let body = function_body(source, "pub fn usb_clear_endpoint_halt(");
-        assert!(body.contains("!DEPCTL_STALL"), "STALL bit must be cleared");
-        assert!(
-            body.contains("DEPCTL_SD0PID"),
-            "data toggle must reset to DATA0"
+    fn inactive_endpoint_is_refused() {
+        assert_eq!(halt_clear_control_value(MPSIZ_64 | DEPCTL_STALL), None);
+    }
+
+    #[test]
+    fn active_endpoint_clears_stall_and_resets_data_toggle() {
+        let ctl = MPSIZ_64 | DEPCTL_USBAEP | DEPCTL_EPENA | DEPCTL_STALL;
+        assert_eq!(
+            halt_clear_control_value(ctl),
+            Some(MPSIZ_64 | DEPCTL_USBAEP | DEPCTL_EPENA | DEPCTL_SD0PID)
+        );
+    }
+
+    #[test]
+    fn active_unhalted_endpoint_still_resets_data_toggle() {
+        let ctl = MPSIZ_64 | DEPCTL_USBAEP;
+        assert_eq!(
+            halt_clear_control_value(ctl),
+            Some(MPSIZ_64 | DEPCTL_USBAEP | DEPCTL_SD0PID)
         );
     }
 }

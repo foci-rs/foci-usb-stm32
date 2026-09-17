@@ -616,9 +616,13 @@ fn usb_req_clear_feature(req: &UsbCtrlRequest) {
         usb_do_stall();
         return;
     };
-    match target {
+    let cleared = match target {
         HaltTarget::In(ep) => otg::usb_clear_endpoint_halt(ep, true),
         HaltTarget::Out(ep) => otg::usb_clear_endpoint_halt(ep, false),
+    };
+    if !cleared {
+        usb_do_stall();
+        return;
     }
     notify_bulk_in();
     notify_bulk_out();
