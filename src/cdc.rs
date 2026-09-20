@@ -64,10 +64,9 @@ fn check_bulk_out_wake() -> bool {
 // TX buffer (bulk IN, matches Klipper's transmit_buf)
 // ----------------------------------------------------------------
 
-/// TX buffer size. Klipper's own `transmit_buf` is 192 bytes, sized for
-/// single console commands; FOCI's commission terminal emits a multi-frame
-/// evidence report back to back and needs room for the whole burst.
-const TX_BUF_SIZE: usize = 1024;
+/// TX buffer size. Holds a complete commission-terminal evidence burst
+/// without producer pacing, with headroom for future reply families.
+const TX_BUF_SIZE: usize = 2048;
 
 /// Bulk IN transmit buffer. `pos` is the current fill level in `buf`.
 struct TxBuffer {
@@ -104,25 +103,27 @@ pub fn tx_buffer_full_drop_count() -> u32 {
 ///
 /// Must not be called from the USB ISR.
 pub fn tx_write(data: &[u8]) {
-    let written = interrupt::free(|cs| {
+    // Keep potentially blocking diagnostics outside the interrupt-masked
+    // section: defmt-rtt can block on a non-draining host.
+    let dropped = interrupt::free(|cs| {
         let mut tx = TX.borrow(cs).borrow_mut();
         let tpos = tx.pos as usize;
         if tpos + data.len() > TX_BUF_SIZE {
             // Not enough space — drop (matches Klipper's console_sendf).
             let drops = TX_BUFFER_FULL_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
-            defmt::warn!(
-                "tx_write: dropped {} byte frame, buffer full ({} total drops)",
-                data.len(),
-                drops
-            );
-            return false;
+            return Some(drops);
         }
         tx.buf[tpos..tpos + data.len()].copy_from_slice(data);
         tx.pos = (tpos + data.len()) as u16;
-        true
+        None
     });
-    if written {
-        notify_bulk_in();
+    match dropped {
+        Some(drops) => defmt::warn!(
+            "tx_write: dropped {} byte frame, buffer full ({} total drops)",
+            data.len(),
+            drops
+        ),
+        None => notify_bulk_in(),
     }
 }
 
