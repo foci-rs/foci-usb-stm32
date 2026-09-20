@@ -11,3 +11,4 @@ trace = []
 
 [dependencies]
 cortex-m = "0.7"
+defmt = "1.0"

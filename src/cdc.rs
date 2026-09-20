@@ -64,13 +64,15 @@ fn check_bulk_out_wake() -> bool {
 // TX buffer (bulk IN, matches Klipper's transmit_buf)
 // ----------------------------------------------------------------
 
-/// TX buffer size (matches Klipper's 192-byte transmit_buf).
-const TX_BUF_SIZE: usize = 192;
+/// TX buffer size. Klipper's own `transmit_buf` is 192 bytes, sized for
+/// single console commands; FOCI's commission terminal emits a multi-frame
+/// evidence report back to back and needs room for the whole burst.
+const TX_BUF_SIZE: usize = 1024;
 
 /// Bulk IN transmit buffer. `pos` is the current fill level in `buf`.
 struct TxBuffer {
     buf: [u8; TX_BUF_SIZE],
-    pos: u8,
+    pos: u16,
 }
 
 /// Bulk IN TX state shared by reply-producing tasks and the USB drain task.
@@ -83,9 +85,9 @@ static TX: Mutex<RefCell<TxBuffer>> = Mutex::new(RefCell::new(TxBuffer {
     pos: 0,
 }));
 
-/// Count of `tx_write` calls that silently dropped a frame because it did
-/// not fit in the remaining TX staging capacity. Diagnostic only -- read
-/// back via `tx_buffer_full_drop_count`, not logged live at this call site.
+/// Count of `tx_write` calls that dropped a frame because it did not fit
+/// in the remaining TX staging capacity. Also readable via
+/// `tx_buffer_full_drop_count`.
 static TX_BUFFER_FULL_DROPS: AtomicU32 = AtomicU32::new(0);
 
 /// Current count of frames dropped by `tx_write`'s buffer-full path.
@@ -96,9 +98,9 @@ pub fn tx_buffer_full_drop_count() -> u32 {
 /// Write data to the USB transmit buffer. This is the primary API for
 /// sending protocol responses over USB.
 ///
-/// If the buffer is full, the data is silently dropped (matching Klipper
-/// behavior in console_sendf when buffer is full). Each drop still counts
-/// toward `tx_buffer_full_drop_count`.
+/// If the buffer is full, the data is dropped (matching Klipper behavior
+/// in console_sendf when buffer is full), a `defmt::warn!` is emitted, and
+/// the drop counts toward `tx_buffer_full_drop_count`.
 ///
 /// Must not be called from the USB ISR.
 pub fn tx_write(data: &[u8]) {
@@ -107,11 +109,16 @@ pub fn tx_write(data: &[u8]) {
         let tpos = tx.pos as usize;
         if tpos + data.len() > TX_BUF_SIZE {
             // Not enough space — drop (matches Klipper's console_sendf).
-            TX_BUFFER_FULL_DROPS.fetch_add(1, Ordering::Relaxed);
+            let drops = TX_BUFFER_FULL_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+            defmt::warn!(
+                "tx_write: dropped {} byte frame, buffer full ({} total drops)",
+                data.len(),
+                drops
+            );
             return false;
         }
         tx.buf[tpos..tpos + data.len()].copy_from_slice(data);
-        tx.pos = (tpos + data.len()) as u8;
+        tx.pos = (tpos + data.len()) as u16;
         true
     });
     if written {
@@ -150,7 +157,7 @@ fn bulk_in_task() {
                 tx.buf[i] = tx.buf[src + i];
             }
         }
-        tx.pos = needcopy as u8;
+        tx.pos = needcopy as u16;
         needcopy > 0
     });
     if needs_more {
