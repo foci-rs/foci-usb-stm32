@@ -578,16 +578,30 @@ pub fn usb_read_ep0(data: &mut [u8], max_len: u8) -> i8 {
     ret
 }
 
+const FLUSH_POLL_LIMIT: u32 = 100_000;
+
+fn poll_until(limit: u32, mut done: impl FnMut() -> bool) -> bool {
+    (0..limit).any(|_| done())
+}
+
 /// Disable and flush a pending TX packet on EP0 IN, if one is in flight.
 /// Leaves the endpoint disabled; the next `fifo_write_packet` re-enables it.
 fn flush_ep0_in() {
     let ctl = readl(reg(diepctl(0)));
-    if ctl & DEPCTL_EPENA != 0 {
-        writel(reg(diepctl(0)), ctl | DEPCTL_EPDIS | DEPCTL_SNAK);
-        while readl(reg(diepctl(0))) & DEPCTL_EPENA != 0 {}
-        writel(reg(GRSTCTL), GRSTCTL_TXFFLSH);
-        while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
+    if ctl & DEPCTL_EPENA == 0 {
+        return;
     }
+    writel(reg(diepctl(0)), ctl | DEPCTL_EPDIS | DEPCTL_SNAK);
+    if !poll_until(FLUSH_POLL_LIMIT, || {
+        readl(reg(diepctl(0))) & DEPCTL_EPENA == 0
+    }) {
+        // TXFFLSH must not be written while the core may still read the FIFO.
+        return;
+    }
+    writel(reg(GRSTCTL), GRSTCTL_TXFFLSH);
+    poll_until(FLUSH_POLL_LIMIT, || {
+        readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH == 0
+    });
 }
 
 /// Read a SETUP packet from EP0.
@@ -965,6 +979,33 @@ mod trace_tests {
         assert!(super::trace_packet_needs_completion_wake(64));
         assert!(!super::trace_packet_needs_completion_wake(0));
         assert!(!super::trace_packet_needs_completion_wake(-1));
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use core::cell::Cell;
+
+    use super::poll_until;
+
+    #[test]
+    fn returns_true_once_the_condition_holds() {
+        let polls = Cell::new(0);
+        assert!(poll_until(10, || {
+            polls.set(polls.get() + 1);
+            polls.get() == 3
+        }));
+        assert_eq!(polls.get(), 3);
+    }
+
+    #[test]
+    fn gives_up_after_the_limit() {
+        let polls = Cell::new(0);
+        assert!(!poll_until(10, || {
+            polls.set(polls.get() + 1);
+            false
+        }));
+        assert_eq!(polls.get(), 10);
     }
 }
 
