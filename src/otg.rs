@@ -897,7 +897,7 @@ pub fn irq_handler() {
         }
     }
 
-    // Complete peripheral writes before the board wrapper wakes the USB task.
+    // Order the handler's peripheral accesses before the board wrapper wakes the USB task.
     cortex_m::asm::dmb();
 }
 
