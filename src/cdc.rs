@@ -103,18 +103,21 @@ fn bulk_in_task() {
     if !check_bulk_in_wake() {
         return;
     }
-    let pending = TX.pending();
+    // SAFETY: `bulk_in_task` and `init` are the only consumers, and both run
+    // in the single USB task context.
+    let tx = unsafe { TX.consumer() };
+    let pending = tx.pending();
     if pending == 0 {
         return;
     }
     let mut packet = [0u8; EP_BULK_IN_SIZE];
-    let len = TX.peek(&mut packet[..bulk_in_packet_len(pending, EP_BULK_IN_SIZE)]);
+    let len = tx.peek(&mut packet[..bulk_in_packet_len(pending, EP_BULK_IN_SIZE)]);
     let ret = otg::usb_send_bulk_in(&packet[..len]);
     if ret <= 0 {
         return;
     }
-    TX.consume(ret as usize);
-    if TX.pending() > 0 {
+    tx.consume(ret as usize);
+    if tx.pending() > 0 {
         notify_bulk_in();
     }
 }
@@ -837,7 +840,9 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
             size: 0,
             flags: 0,
         };
-        TX.consume(TX.pending());
+        // SAFETY: `init` runs once at boot, before the USB task consumes.
+        let tx = TX.consumer();
+        tx.consume(tx.pending());
         (*RX.get()).pos = 0;
         *LINE.get() = LineState {
             coding: UsbCdcLineCoding::default(),

@@ -107,16 +107,32 @@ impl<const N: usize> TxRing<N> {
         );
     }
 
+    /// Handle for reading and releasing published bytes.
+    ///
+    /// # Safety
+    ///
+    /// At most one execution context may consume from a ring. A second consumer
+    /// could release slots the first is still reading while a producer reuses them.
+    pub(crate) unsafe fn consumer(&self) -> TxConsumer<'_, N> {
+        TxConsumer { ring: self }
+    }
+}
+
+pub(crate) struct TxConsumer<'a, const N: usize> {
+    ring: &'a TxRing<N>,
+}
+
+impl<const N: usize> TxConsumer<'_, N> {
     pub(crate) fn pending(&self) -> usize {
-        let published_end = self.published_end.load(Ordering::Acquire);
-        published_end.wrapping_sub(self.released_end.load(Ordering::Relaxed)) as usize
+        let published_end = self.ring.published_end.load(Ordering::Acquire);
+        published_end.wrapping_sub(self.ring.released_end.load(Ordering::Relaxed)) as usize
     }
 
     pub(crate) fn peek(&self, out: &mut [u8]) -> usize {
         let len = out.len().min(self.pending());
-        let index = self.released_end.load(Ordering::Relaxed) as usize % N;
+        let index = self.ring.released_end.load(Ordering::Relaxed) as usize % N;
         let first = len.min(N - index);
-        let base = self.buf.get() as *const u8;
+        let base = self.ring.buf.get() as *const u8;
         // SAFETY: `[released_end, released_end + len)` is published, so producers
         // have finished writing it and will not reuse it until `consume` releases it.
         unsafe {
@@ -127,8 +143,9 @@ impl<const N: usize> TxRing<N> {
     }
 
     pub(crate) fn consume(&self, len: usize) {
-        let released_end = self.released_end.load(Ordering::Relaxed);
-        self.released_end
+        let released_end = self.ring.released_end.load(Ordering::Relaxed);
+        self.ring
+            .released_end
             .store(released_end.wrapping_add(len as u32), Ordering::Release);
     }
 }
@@ -147,12 +164,18 @@ pub(crate) fn bulk_in_packet_len(pending: usize, max_packet: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{TxRing, bulk_in_packet_len};
+    use super::{TxConsumer, TxRing, bulk_in_packet_len};
+
+    fn consumer(ring: &TxRing<16>) -> TxConsumer<'_, 16> {
+        // SAFETY: each test consumes from its ring on the test thread only.
+        unsafe { ring.consumer() }
+    }
 
     fn drain(ring: &TxRing<16>) -> ([u8; 16], usize) {
+        let rx = consumer(ring);
         let mut out = [0u8; 16];
-        let n = ring.peek(&mut out);
-        ring.consume(n);
+        let n = rx.peek(&mut out);
+        rx.consume(n);
         (out, n)
     }
 
@@ -162,11 +185,11 @@ mod tests {
 
         assert!(ring.push(b"abcdef"));
         assert!(ring.push(b"ghij"));
-        assert_eq!(ring.pending(), 10);
+        assert_eq!(consumer(&ring).pending(), 10);
 
         let (out, n) = drain(&ring);
         assert_eq!(&out[..n], b"abcdefghij");
-        assert_eq!(ring.pending(), 0);
+        assert_eq!(consumer(&ring).pending(), 0);
         assert!(ring.push(&[7u8; 16]));
     }
 
@@ -177,7 +200,7 @@ mod tests {
 
         assert!(!ring.push(&[2u8; 5]));
 
-        assert_eq!(ring.pending(), 12);
+        assert_eq!(consumer(&ring).pending(), 12);
         let (out, n) = drain(&ring);
         assert_eq!(&out[..n], &[1u8; 12]);
     }
@@ -191,7 +214,7 @@ mod tests {
         assert!(ring.push(b"0123456789"));
 
         let mut out = [0u8; 16];
-        let n = ring.peek(&mut out);
+        let n = consumer(&ring).peek(&mut out);
         assert_eq!(&out[..n], b"0123456789");
     }
 
@@ -201,8 +224,8 @@ mod tests {
         assert!(ring.push(b"abcdefgh"));
 
         let mut out = [0u8; 3];
-        assert_eq!(ring.peek(&mut out), 3);
-        ring.consume(3);
+        assert_eq!(consumer(&ring).peek(&mut out), 3);
+        consumer(&ring).consume(3);
 
         let (rest, n) = drain(&ring);
         assert_eq!(&rest[..n], b"defgh");
@@ -214,7 +237,7 @@ mod tests {
 
         assert!(ring.write_frame(b"outer", || {
             assert!(ring.push(b"inner"));
-            assert_eq!(ring.pending(), 0);
+            assert_eq!(consumer(&ring).pending(), 0);
         }));
 
         let (out, n) = drain(&ring);
@@ -227,10 +250,10 @@ mod tests {
 
         assert!(ring.write_frame(&[1u8; 12], || {
             assert!(!ring.push(&[2u8; 8]));
-            assert_eq!(ring.pending(), 0);
+            assert_eq!(consumer(&ring).pending(), 0);
         }));
 
-        assert_eq!(ring.pending(), 12);
+        assert_eq!(consumer(&ring).pending(), 12);
     }
 
     #[test]
@@ -238,7 +261,7 @@ mod tests {
         let ring = TxRing::<16>::starting_at(u32::MAX - 4);
 
         assert!(ring.push(b"abcdefghij"));
-        assert_eq!(ring.pending(), 10);
+        assert_eq!(consumer(&ring).pending(), 10);
         let (out, n) = drain(&ring);
         assert_eq!(&out[..n], b"abcdefghij");
 
