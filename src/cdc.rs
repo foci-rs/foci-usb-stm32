@@ -584,15 +584,8 @@ fn usb_req_set_configuration(req: &UsbCtrlRequest) {
     usb_do_xfer(core::ptr::null_mut(), 0, UX_SEND);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HaltTarget {
-    In(usize),
-    Out(usize),
-}
-
-fn clear_endpoint_halt_target(req: &UsbCtrlRequest) -> Option<HaltTarget> {
+fn clear_endpoint_halt_target(req: &UsbCtrlRequest) -> Option<(usize, bool)> {
     if req.b_request_type != descriptors::USB_RECIP_ENDPOINT
-        || req.b_request != descriptors::USB_REQ_CLEAR_FEATURE
         || req.w_value != descriptors::USB_FEATURE_ENDPOINT_HALT
         || req.w_length != 0
     {
@@ -605,24 +598,19 @@ fn clear_endpoint_halt_target(req: &UsbCtrlRequest) -> Option<HaltTarget> {
     let is_in = address & descriptors::USB_DIR_IN as u16 != 0;
     let ep = (address & 0x0F) as usize;
     match (ep, is_in) {
-        (EP_BULK_IN, true) | (EP_ACM, true) => Some(HaltTarget::In(ep)),
+        (EP_BULK_IN, true) | (EP_ACM, true) | (EP_BULK_OUT, false) => Some((ep, is_in)),
         #[cfg(feature = "trace")]
-        (EP_TRACE_IN, true) => Some(HaltTarget::In(ep)),
-        (EP_BULK_OUT, false) => Some(HaltTarget::Out(ep)),
+        (EP_TRACE_IN, true) => Some((ep, is_in)),
         _ => None,
     }
 }
 
 fn usb_req_clear_feature(req: &UsbCtrlRequest) {
-    let Some(target) = clear_endpoint_halt_target(req) else {
+    let Some((ep, is_in)) = clear_endpoint_halt_target(req) else {
         usb_do_stall();
         return;
     };
-    let cleared = match target {
-        HaltTarget::In(ep) => otg::usb_clear_endpoint_halt(ep, true),
-        HaltTarget::Out(ep) => otg::usb_clear_endpoint_halt(ep, false),
-    };
-    if !cleared {
+    if !otg::usb_clear_endpoint_halt(ep, is_in) {
         usb_do_stall();
         return;
     }
@@ -953,7 +941,7 @@ pub fn shutdown() {
 
 #[cfg(test)]
 mod clear_feature_tests {
-    use super::{HaltTarget, clear_endpoint_halt_target};
+    use super::clear_endpoint_halt_target;
     use crate::descriptors::{USB_DIR_IN, UsbCtrlRequest};
     use crate::ep::{EP_ACM, EP_BULK_IN, EP_BULK_OUT};
 
@@ -970,28 +958,19 @@ mod clear_feature_tests {
     #[test]
     fn bulk_in_address_resolves_to_in_endpoint() {
         let req = clear_halt(EP_BULK_IN as u16 | USB_DIR_IN as u16);
-        assert_eq!(
-            clear_endpoint_halt_target(&req),
-            Some(HaltTarget::In(EP_BULK_IN))
-        );
+        assert_eq!(clear_endpoint_halt_target(&req), Some((EP_BULK_IN, true)));
     }
 
     #[test]
     fn bulk_out_address_resolves_to_out_endpoint() {
         let req = clear_halt(EP_BULK_OUT as u16);
-        assert_eq!(
-            clear_endpoint_halt_target(&req),
-            Some(HaltTarget::Out(EP_BULK_OUT))
-        );
+        assert_eq!(clear_endpoint_halt_target(&req), Some((EP_BULK_OUT, false)));
     }
 
     #[test]
     fn acm_notification_address_resolves_to_in_endpoint() {
         let req = clear_halt(EP_ACM as u16 | USB_DIR_IN as u16);
-        assert_eq!(
-            clear_endpoint_halt_target(&req),
-            Some(HaltTarget::In(EP_ACM))
-        );
+        assert_eq!(clear_endpoint_halt_target(&req), Some((EP_ACM, true)));
     }
 
     #[cfg(feature = "trace")]
@@ -999,13 +978,10 @@ mod clear_feature_tests {
     fn trace_in_shares_endpoint_number_with_bulk_out() {
         use crate::ep::EP_TRACE_IN;
         let req = clear_halt(EP_TRACE_IN as u16 | USB_DIR_IN as u16);
-        assert_eq!(
-            clear_endpoint_halt_target(&req),
-            Some(HaltTarget::In(EP_TRACE_IN))
-        );
+        assert_eq!(clear_endpoint_halt_target(&req), Some((EP_TRACE_IN, true)));
         assert_eq!(
             clear_endpoint_halt_target(&clear_halt(EP_BULK_OUT as u16)),
-            Some(HaltTarget::Out(EP_BULK_OUT))
+            Some((EP_BULK_OUT, false))
         );
     }
 
