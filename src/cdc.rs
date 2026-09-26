@@ -78,13 +78,12 @@ static TX_DROPPING: AtomicBool = AtomicBool::new(false);
 /// sending protocol responses over USB.
 ///
 /// If the buffer is full, the data is dropped (matching Klipper behavior
-/// in console_sendf when buffer is full). The first drop after a staged
-/// frame logs a `defmt::warn!` with the running drop count.
+/// in console_sendf when buffer is full). The first drop after the USB
+/// drain last freed space logs a `defmt::warn!` with the running drop count.
 ///
 /// Safe to call from any task or interrupt priority.
 pub fn tx_write(data: &[u8]) {
     if TX.push(data) {
-        TX_DROPPING.store(false, Ordering::Relaxed);
         notify_bulk_in();
         return;
     }
@@ -117,6 +116,7 @@ fn bulk_in_task() {
         return;
     }
     tx.consume(ret as usize);
+    TX_DROPPING.store(false, Ordering::Relaxed);
     if tx.pending() > 0 {
         notify_bulk_in();
     }
