@@ -16,6 +16,7 @@ pub mod otg;
 mod sync;
 #[cfg(feature = "trace")]
 pub mod trace;
+mod tx_ring;
 
 /// Endpoint constants (from usb_cdc_ep.h)
 pub mod ep {

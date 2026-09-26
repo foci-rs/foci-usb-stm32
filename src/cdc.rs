@@ -7,10 +7,7 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-use cortex_m::interrupt::{self, Mutex};
 
 use crate::descriptors::{
     self, CdcConfigDescriptor, DescriptorEntry, StringDescriptorBuf, UsbCdcLineCoding,
@@ -21,6 +18,7 @@ use crate::ep::EP_TRACE_IN;
 use crate::ep::{EP_ACM, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE, EP0_SIZE};
 use crate::otg;
 use crate::sync::RacyCell;
+use crate::tx_ring::{TxRing, bulk_in_packet_len};
 
 // ----------------------------------------------------------------
 // Wake flags (replace Klipper's sched_wake_task / sched_check_wake)
@@ -68,21 +66,7 @@ fn check_bulk_out_wake() -> bool {
 /// without producer pacing, with headroom for future reply families.
 const TX_BUF_SIZE: usize = 2048;
 
-/// Bulk IN transmit buffer. `pos` is the current fill level in `buf`.
-struct TxBuffer {
-    buf: [u8; TX_BUF_SIZE],
-    pos: u16,
-}
-
-/// Bulk IN TX state shared by reply-producing tasks and the USB drain task.
-///
-/// The USB ISR only sets the bulk-in wake flag. Task-context writers and the
-/// drain can preempt each other, so every buffer access uses one brief global
-/// critical section.
-static TX: Mutex<RefCell<TxBuffer>> = Mutex::new(RefCell::new(TxBuffer {
-    buf: [0u8; TX_BUF_SIZE],
-    pos: 0,
-}));
+static TX: TxRing<TX_BUF_SIZE> = TxRing::new();
 
 /// Count of `tx_write` calls that dropped a frame because it did not fit
 /// in the remaining TX staging capacity.
@@ -95,30 +79,18 @@ static TX_BUFFER_FULL_DROPS: AtomicU32 = AtomicU32::new(0);
 /// in console_sendf when buffer is full) and a `defmt::warn!` reports the
 /// running drop count.
 ///
-/// Must not be called from the USB ISR.
+/// Safe to call from any task or interrupt priority.
 pub fn tx_write(data: &[u8]) {
-    // Keep potentially blocking diagnostics outside the interrupt-masked
-    // section: defmt-rtt can block on a non-draining host.
-    let dropped = interrupt::free(|cs| {
-        let mut tx = TX.borrow(cs).borrow_mut();
-        let tpos = tx.pos as usize;
-        if tpos + data.len() > TX_BUF_SIZE {
-            // Not enough space — drop (matches Klipper's console_sendf).
-            let drops = TX_BUFFER_FULL_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
-            return Some(drops);
-        }
-        tx.buf[tpos..tpos + data.len()].copy_from_slice(data);
-        tx.pos = (tpos + data.len()) as u16;
-        None
-    });
-    match dropped {
-        Some(drops) => defmt::warn!(
-            "tx_write: dropped {} byte frame, buffer full ({} total drops)",
-            data.len(),
-            drops
-        ),
-        None => notify_bulk_in(),
+    if TX.push(data) {
+        notify_bulk_in();
+        return;
     }
+    let drops = TX_BUFFER_FULL_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+    defmt::warn!(
+        "tx_write: dropped {} byte frame, buffer full ({} total drops)",
+        data.len(),
+        drops
+    );
 }
 
 /// Process bulk IN transmissions. Matches `usb_bulk_in_task()` in usb_cdc.c.
@@ -126,36 +98,18 @@ fn bulk_in_task() {
     if !check_bulk_in_wake() {
         return;
     }
-    let needs_more = interrupt::free(|cs| {
-        let mut tx = TX.borrow(cs).borrow_mut();
-        let tpos = tx.pos as usize;
-        if tpos == 0 {
-            return false;
-        }
-        let mut max_tpos = tpos;
-        if max_tpos > EP_BULK_IN_SIZE {
-            max_tpos = EP_BULK_IN_SIZE;
-        } else if max_tpos == EP_BULK_IN_SIZE {
-            // Avoid zero-length-packets.
-            max_tpos = EP_BULK_IN_SIZE - 1;
-        }
-        let ret = otg::usb_send_bulk_in(&tx.buf[..max_tpos]);
-        if ret <= 0 {
-            return false;
-        }
-        let ret = ret as usize;
-        let needcopy = tpos - ret;
-        if needcopy > 0 {
-            // Move remaining data to front of buffer (memmove-equivalent).
-            let src = ret;
-            for i in 0..needcopy {
-                tx.buf[i] = tx.buf[src + i];
-            }
-        }
-        tx.pos = needcopy as u16;
-        needcopy > 0
-    });
-    if needs_more {
+    let pending = TX.pending();
+    if pending == 0 {
+        return;
+    }
+    let mut packet = [0u8; EP_BULK_IN_SIZE];
+    let len = TX.peek(&mut packet[..bulk_in_packet_len(pending, EP_BULK_IN_SIZE)]);
+    let ret = otg::usb_send_bulk_in(&packet[..len]);
+    if ret <= 0 {
+        return;
+    }
+    TX.consume(ret as usize);
+    if TX.pending() > 0 {
         notify_bulk_in();
     }
 }
@@ -878,7 +832,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
             size: 0,
             flags: 0,
         };
-        interrupt::free(|cs| TX.borrow(cs).borrow_mut().pos = 0);
+        TX.consume(TX.pending());
         (*RX.get()).pos = 0;
         *LINE.get() = LineState {
             coding: UsbCdcLineCoding::default(),
