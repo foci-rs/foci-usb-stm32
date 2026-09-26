@@ -72,25 +72,30 @@ static TX: TxRing<TX_BUF_SIZE> = TxRing::new();
 /// in the remaining TX staging capacity.
 static TX_BUFFER_FULL_DROPS: AtomicU32 = AtomicU32::new(0);
 
+static TX_DROPPING: AtomicBool = AtomicBool::new(false);
+
 /// Write data to the USB transmit buffer. This is the primary API for
 /// sending protocol responses over USB.
 ///
 /// If the buffer is full, the data is dropped (matching Klipper behavior
-/// in console_sendf when buffer is full) and a `defmt::warn!` reports the
-/// running drop count.
+/// in console_sendf when buffer is full). The first drop after a staged
+/// frame logs a `defmt::warn!` with the running drop count.
 ///
 /// Safe to call from any task or interrupt priority.
 pub fn tx_write(data: &[u8]) {
     if TX.push(data) {
+        TX_DROPPING.store(false, Ordering::Relaxed);
         notify_bulk_in();
         return;
     }
     let drops = TX_BUFFER_FULL_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
-    defmt::warn!(
-        "tx_write: dropped {} byte frame, buffer full ({} total drops)",
-        data.len(),
-        drops
-    );
+    if !TX_DROPPING.swap(true, Ordering::Relaxed) {
+        defmt::warn!(
+            "tx_write: dropped {} byte frame, buffer full ({} total drops)",
+            data.len(),
+            drops
+        );
+    }
 }
 
 /// Process bulk IN transmissions. Matches `usb_bulk_in_task()` in usb_cdc.c.
