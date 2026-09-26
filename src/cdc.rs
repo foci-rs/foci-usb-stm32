@@ -85,21 +85,15 @@ static TX: Mutex<RefCell<TxBuffer>> = Mutex::new(RefCell::new(TxBuffer {
 }));
 
 /// Count of `tx_write` calls that dropped a frame because it did not fit
-/// in the remaining TX staging capacity. Also readable via
-/// `tx_buffer_full_drop_count`.
+/// in the remaining TX staging capacity.
 static TX_BUFFER_FULL_DROPS: AtomicU32 = AtomicU32::new(0);
-
-/// Current count of frames dropped by `tx_write`'s buffer-full path.
-pub fn tx_buffer_full_drop_count() -> u32 {
-    TX_BUFFER_FULL_DROPS.load(Ordering::Relaxed)
-}
 
 /// Write data to the USB transmit buffer. This is the primary API for
 /// sending protocol responses over USB.
 ///
 /// If the buffer is full, the data is dropped (matching Klipper behavior
-/// in console_sendf when buffer is full), a `defmt::warn!` is emitted, and
-/// the drop counts toward `tx_buffer_full_drop_count`.
+/// in console_sendf when buffer is full) and a `defmt::warn!` reports the
+/// running drop count.
 ///
 /// Must not be called from the USB ISR.
 pub fn tx_write(data: &[u8]) {
