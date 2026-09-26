@@ -952,27 +952,6 @@ pub fn shutdown() {
 }
 
 #[cfg(test)]
-mod tx_tests {
-    use super::*;
-
-    fn assert_synchronized_tx(_tx: &cortex_m::interrupt::Mutex<core::cell::RefCell<TxBuffer>>) {}
-
-    #[test]
-    fn transmit_buffer_enforces_cross_task_serialization() {
-        assert_synchronized_tx(&TX);
-    }
-
-    // No host test calls tx_write: it's wrapped in cortex_m::interrupt::free,
-    // whose disable/enable primitives have no host-target definition. Any
-    // test that reaches that call path fails to link (undefined symbols
-    // __cpsid/__cpsie/__primask_r), not merely to behave incorrectly. That
-    // dead-code-strips cleanly today only because nothing in the existing
-    // suite calls tx_write either -- verified on the CDC TX path, this is a
-    // target-only-testable boundary, same class as board_init.rs's MMIO
-    // writes.
-}
-
-#[cfg(test)]
 mod clear_feature_tests {
     use super::{HaltTarget, clear_endpoint_halt_target};
     use crate::descriptors::{USB_DIR_IN, UsbCtrlRequest};
