@@ -987,12 +987,6 @@ pub unsafe fn init(config: &OtgConfig) {
     }
 }
 
-/// Returns the USB peripheral base address.
-/// Returns 0 if `init()` has not been called.
-pub fn usb_base() -> usize {
-    USB_BASE.load(Ordering::Relaxed)
-}
-
 /// Check if the bulk IN endpoint is configured (USBAEP bit set).
 /// Returns true after SET_CONFIGURATION has been processed.
 pub fn is_bulk_in_configured() -> bool {
