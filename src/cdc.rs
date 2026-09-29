@@ -1,6 +1,4 @@
-// USB CDC-ACM protocol layer (port of usb_cdc.c)
-//
-// Handles EP0 control transfers, bulk IN/OUT, and descriptor dispatch.
+// Port of Klipper's src/generic/usb_cdc.c to Rust.
 //
 // Copyright (C) 2018  Kevin O'Connor <kevin@koconnor.net>
 // Copyright (C) 2026  Morton Jonuschat
@@ -19,10 +17,6 @@ use crate::ep::{EP_ACM, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SI
 use crate::otg;
 use crate::sync::RacyCell;
 use crate::tx_ring::{TxRing, bulk_in_packet_len};
-
-// ----------------------------------------------------------------
-// Wake flags (replace Klipper's sched_wake_task / sched_check_wake)
-// ----------------------------------------------------------------
 
 static EP0_WAKE: AtomicBool = AtomicBool::new(false);
 static BULK_IN_WAKE: AtomicBool = AtomicBool::new(false);
@@ -57,10 +51,6 @@ fn check_bulk_in_wake() -> bool {
 fn check_bulk_out_wake() -> bool {
     BULK_OUT_WAKE.swap(false, Ordering::AcqRel)
 }
-
-// ----------------------------------------------------------------
-// TX buffer (bulk IN, matches Klipper's transmit_buf)
-// ----------------------------------------------------------------
 
 /// TX buffer size. Holds a complete commission-terminal evidence burst
 /// without producer pacing, with headroom for future reply families.
@@ -97,7 +87,7 @@ pub fn tx_write(data: &[u8]) {
     }
 }
 
-/// Process bulk IN transmissions. Matches `usb_bulk_in_task()` in usb_cdc.c.
+/// Process bulk IN transmissions.
 fn bulk_in_task() {
     if !check_bulk_in_wake() {
         return;
@@ -122,11 +112,7 @@ fn bulk_in_task() {
     }
 }
 
-// ----------------------------------------------------------------
-// RX buffer (bulk OUT, matches Klipper's receive_buf)
-// ----------------------------------------------------------------
-
-/// RX buffer size (matches Klipper's 128-byte receive_buf).
+/// RX buffer size.
 const RX_BUF_SIZE: usize = 128;
 
 /// Bulk OUT receive buffer. `pos` is the current fill level in `buf`.
@@ -185,7 +171,7 @@ pub fn rx_consume(len: usize) {
     }
 }
 
-/// Process bulk OUT reception. Matches `usb_bulk_out_task()` in usb_cdc.c.
+/// Process bulk OUT reception.
 ///
 /// Returns true if receive data is available for protocol processing.
 fn bulk_out_task() -> bool {
@@ -209,15 +195,10 @@ fn bulk_out_task() -> bool {
     }
 }
 
-// ----------------------------------------------------------------
-// EP0 control transfer state machine (port of usb_cdc.c EP0 section)
-// ----------------------------------------------------------------
-
-/// EP0 transfer direction/flags (matches UX_READ, UX_SEND, etc.)
+/// EP0 transfer direction/flags
 const UX_READ: u8 = 1 << 0;
 const UX_SEND: u8 = 1 << 1;
 const UX_SEND_ZLP: u8 = 1 << 3;
-// Note: UX_SEND_PROGMEM (1 << 2) not needed -- no PROGMEM on ARM Cortex-M.
 
 /// EP0 control-transfer continuation state. Filled when `usb_do_xfer`
 /// returns before the transfer completes (hardware busy) and consumed by
@@ -265,7 +246,7 @@ fn usb_do_stall() {
     }
 }
 
-/// Execute an EP0 data transfer. Matches `usb_do_xfer()` in usb_cdc.c.
+/// Execute an EP0 data transfer.
 ///
 /// This implements the multi-packet EP0 transfer state machine:
 /// - For SEND: sends data in EP0_SIZE chunks, with optional ZLP
@@ -280,7 +261,6 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
             size
         };
         let ret: i8 = if flags & UX_READ != 0 {
-            // Read directly into target buffer (matches C usb_do_xfer).
             // SAFETY: data points to a writable static with at least
             // `xs` bytes remaining (e.g. LINE_CODING).
             let buf = unsafe { core::slice::from_raw_parts_mut(data, xs as usize) };
@@ -296,20 +276,16 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
         };
 
         if ret == xs as i8 {
-            // Success — advance pointer.
             // SAFETY: pointer arithmetic on valid static data.
             data = unsafe { data.add(xs as usize) };
             size -= xs;
             if size == 0 {
-                // Entire transfer completed successfully
                 if flags & UX_READ != 0 {
-                    // Send status ZLP
                     flags = UX_SEND;
                     data = core::ptr::null_mut();
                     continue;
                 }
                 if xs as usize == EP0_SIZE && flags & UX_SEND_ZLP != 0 {
-                    // Must send zero-length-packet
                     continue;
                 }
                 // SAFETY: `XFER` is only touched from the EP0 task context.
@@ -322,7 +298,6 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
             continue;
         }
         if ret == -1 {
-            // Interface busy — save continuation for the next ep0_task pass.
             // SAFETY: `XFER` is only touched from the EP0 task context.
             unsafe {
                 *XFER.get() = XferState { data, size, flags };
@@ -342,15 +317,10 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
             notify_ep0();
             return;
         }
-        // Error
         usb_do_stall();
         return;
     }
 }
-
-// ----------------------------------------------------------------
-// Descriptor table (built at init time, stored in statics)
-// ----------------------------------------------------------------
 
 /// Maximum number of descriptor entries.
 const MAX_DESCRIPTORS: usize = 8;
@@ -487,10 +457,6 @@ static DESCRIPTORS: RacyCell<Descriptors> = RacyCell::new(Descriptors {
     count: 0,
 });
 
-// ----------------------------------------------------------------
-// EP0 request handlers (port of usb_cdc.c request handlers)
-// ----------------------------------------------------------------
-
 /// Handle GET_DESCRIPTOR request.
 fn usb_req_get_descriptor(req: &UsbCtrlRequest) {
     if req.b_request_type != descriptors::USB_DIR_IN {
@@ -584,7 +550,7 @@ fn usb_req_clear_feature(req: &UsbCtrlRequest) {
 // Katapult/CanBoot bootloader constants (from Klipper armcm_reset.c).
 const KATAPULT_BOOT_ADDRESS: u32 = 0x0800_0000;
 const KATAPULT_SIGNATURE: u64 = 0x2174_6f6f_426e_6143; // "CanBoot!"
-const KATAPULT_REQUEST: u64 = 0x5984_E3FA_6CA1_589B; // stay in bootloader
+const KATAPULT_REQUEST: u64 = 0x5984_E3FA_6CA1_589B;
 
 /// True if a valid Katapult bootloader was detected at boot.
 /// Set once during `detect_bootloader()`, read by `check_reboot()`.
@@ -608,7 +574,6 @@ fn detect_bootloader() {
 
 /// Write the Katapult request signature and reset into the bootloader.
 ///
-/// Matches Klipper's `canboot_reset(CANBOOT_REQUEST)` in armcm_reset.c.
 fn bootloader_request() {
     // SAFETY: The vector table at KATAPULT_BOOT_ADDRESS is readable.
     // HAS_BOOTLOADER guarantees the signature is valid.
@@ -624,7 +589,7 @@ fn bootloader_request() {
 }
 
 /// Check if the host is requesting a reboot into the bootloader.
-/// Matches `check_reboot()` in usb_cdc.c. Only triggers if a valid
+/// Only triggers if a valid
 /// Katapult bootloader was detected at boot (mirrors Klipper C's
 /// `CONFIG_HAVE_BOOTLOADER_REQUEST` compile-time guard).
 fn check_reboot() {
@@ -691,7 +656,6 @@ fn usb_req_set_line(req: &UsbCtrlRequest) {
 }
 
 /// EP0 state machine: read a setup packet and dispatch.
-/// Matches `usb_state_ready()` in usb_cdc.c.
 fn usb_state_ready() {
     let mut req_buf = [0u8; 8];
     let ret = otg::usb_read_ep0_setup(&mut req_buf, 8);
@@ -716,7 +680,6 @@ fn usb_state_ready() {
 }
 
 /// EP0 task: process pending EP0 transfers or read new setup packets.
-/// Matches `usb_ep0_task()` in usb_cdc.c.
 fn ep0_task() {
     if !check_ep0_wake() {
         return;
@@ -733,10 +696,6 @@ fn ep0_task() {
     }
 }
 
-// ----------------------------------------------------------------
-// Public API
-// ----------------------------------------------------------------
-
 /// Initialize the CDC layer with descriptor data.
 ///
 /// Must be called before `poll()`. Typically called right after `otg::init()`.
@@ -750,7 +709,6 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         // Check for Katapult bootloader (must happen before USB traffic).
         detect_bootloader();
 
-        // Build descriptors.
         let d = &mut *DESCRIPTORS.get();
         d.device = descriptors::build_device_descriptor(vid, pid);
         d.config = descriptors::build_config_descriptor();
@@ -763,8 +721,6 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         d.str_product = StringDescriptorBuf::from_ascii(product);
         d.str_serial = StringDescriptorBuf::from_ascii(serial);
 
-        // Build descriptor lookup table using raw pointers into `DESCRIPTORS`
-        // so every entry points to storage with static lifetime.
         let device_ptr = (&raw const d.device) as *const u8;
         #[cfg(not(feature = "trace"))]
         let config_ptr = (&raw const d.config) as *const u8;
@@ -834,7 +790,6 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
 
         d.count = idx;
 
-        // Reset transfer state.
         *XFER.get() = XferState {
             data: core::ptr::null_mut(),
             size: 0,
@@ -896,7 +851,6 @@ pub fn is_configured() -> bool {
 }
 
 /// Signal shutdown — wake all tasks so they can drain.
-/// Matches `usb_shutdown()` in usb_cdc.c.
 pub fn shutdown() {
     notify_bulk_in();
     notify_bulk_out();

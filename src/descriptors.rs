@@ -1,4 +1,4 @@
-// USB descriptor types and static tables (port of usb_cdc.c descriptor section)
+// Port of the descriptor section of Klipper's src/generic/usb_cdc.c to Rust.
 //
 // Copyright (C) 2018  Kevin O'Connor <kevin@koconnor.net>
 // Copyright (C) 2026  Morton Jonuschat
@@ -11,7 +11,6 @@ use crate::ep::{
 #[cfg(feature = "trace")]
 use crate::ep::{EP_TRACE_IN, EP_TRACE_IN_SIZE};
 
-// USB standard constants
 pub const USB_DIR_OUT: u8 = 0x00;
 pub const USB_DIR_IN: u8 = 0x80;
 
@@ -42,7 +41,6 @@ pub const USB_ENDPOINT_XFER_INT: u8 = 0x03;
 
 pub const USB_LANGID_ENGLISH_US: u16 = 0x0409;
 
-// CDC class constants
 pub const USB_CDC_SUBCLASS_ACM: u8 = 0x02;
 pub const USB_CDC_ACM_PROTO_AT_V25TER: u8 = 0x01;
 pub const USB_CDC_CS_INTERFACE: u8 = 0x24;
@@ -54,12 +52,11 @@ pub const USB_CDC_REQ_SET_LINE_CODING: u8 = 0x20;
 pub const USB_CDC_REQ_GET_LINE_CODING: u8 = 0x21;
 pub const USB_CDC_REQ_SET_CONTROL_LINE_STATE: u8 = 0x22;
 
-// String descriptor IDs
 pub const USB_STR_ID_MANUFACTURER: u8 = 1;
 pub const USB_STR_ID_PRODUCT: u8 = 2;
 pub const USB_STR_ID_SERIAL: u8 = 3;
 
-/// USB control request (8 bytes, matches struct usb_ctrlrequest)
+/// USB control request (8 bytes)
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct UsbCtrlRequest {
@@ -70,7 +67,7 @@ pub struct UsbCtrlRequest {
     pub w_length: u16,
 }
 
-/// CDC line coding (7 bytes, matches struct usb_cdc_line_coding)
+/// CDC line coding (7 bytes)
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UsbCdcLineCoding {
@@ -172,7 +169,7 @@ pub struct UsbCdcUnionDescriptor {
     pub b_slave_interface0: u8,
 }
 
-/// Full CDC configuration descriptor (matches struct config_s in usb_cdc.c)
+/// Full CDC configuration descriptor
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct CdcConfigDescriptor {
@@ -424,7 +421,7 @@ impl StringDescriptorBuf {
 }
 
 /// Fill a string descriptor buffer from a chip ID (hex nibbles).
-/// Matches Klipper's `usb_fill_serial()`.
+///
 ///
 /// `id` is the raw chip ID bytes. `strlen` is the number of hex nibbles
 /// to encode (typically `id.len() * 2`).
@@ -447,7 +444,7 @@ pub fn fill_serial_from_chip_id(buf: &mut StringDescriptorBuf, strlen: usize, id
     buf.len = total_len as u8;
 }
 
-/// Descriptor lookup entry (matches struct descriptor_s in usb_cdc.c).
+/// Descriptor lookup entry.
 pub struct DescriptorEntry {
     pub w_value: u16,
     pub w_index: u16,

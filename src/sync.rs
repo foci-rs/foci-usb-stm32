@@ -11,9 +11,7 @@ use core::cell::UnsafeCell;
 ///
 /// Callers must uphold the usual `UnsafeCell` exclusivity requirements:
 /// at most one live reference (shared or exclusive) across all execution
-/// contexts that may touch the value. The klipper-usb crate enforces this
-/// via RTIC task context ownership or via `usb_irq_disable`/`usb_irq_enable`
-/// windows documented at each call site.
+/// contexts that may touch the value.
 #[repr(transparent)]
 pub(crate) struct RacyCell<T>(UnsafeCell<T>);
 
@@ -21,7 +19,7 @@ pub(crate) struct RacyCell<T>(UnsafeCell<T>);
 // obligation — at most one live reference across contexts — is discharged
 // at each unsafe access site within this crate. `T` is not required to be
 // `Send`; any `T` that the crate stores (including raw pointers) is moved
-// between tasks only through the documented access protocol.
+// between tasks only under the same per-site exclusivity.
 unsafe impl<T> Sync for RacyCell<T> {}
 
 impl<T> RacyCell<T> {
@@ -33,7 +31,7 @@ impl<T> RacyCell<T> {
     /// Raw mutable pointer to the inner value.
     ///
     /// The caller must ensure exclusive access for the duration of any
-    /// dereference. See the crate-level access protocol.
+    /// dereference.
     pub(crate) const fn get(&self) -> *mut T {
         self.0.get()
     }

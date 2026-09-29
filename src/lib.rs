@@ -1,7 +1,4 @@
-// USB OTG CDC-ACM driver for Klipper protocol
-//
-// Faithful port of Klipper's src/stm32/usbotg.c and src/generic/usb_cdc.c
-// to Rust, for use in the FOCI firmware.
+// Port of Klipper's src/stm32/usbotg.c and src/generic/usb_cdc.c to Rust.
 //
 // Copyright (C) 2019-2025  Kevin O'Connor <kevin@koconnor.net>
 // Copyright (C) 2026  Morton Jonuschat
