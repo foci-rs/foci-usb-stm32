@@ -22,4 +22,4 @@ foci-usb-stm32 = { git = "https://github.com/foci-rs/foci-usb-stm32" }
 
 ## License
 
-GPL-3.0-or-later. See `COPYING` at the repo root for the full text..
+GPL-3.0-or-later. See `LICENSE` at the repo root for the full text.
