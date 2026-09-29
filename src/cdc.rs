@@ -14,7 +14,7 @@ use crate::descriptors::{
 #[cfg(feature = "trace")]
 use crate::ep::EP_TRACE_IN;
 use crate::ep::{EP_ACM, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE, EP0_SIZE};
-use crate::otg;
+use crate::otg::{self, EpError};
 use crate::sync::RacyCell;
 use crate::tx_ring::{TxRing, bulk_in_packet_len};
 
@@ -101,11 +101,13 @@ fn bulk_in_task() {
     }
     let mut packet = [0u8; EP_BULK_IN_SIZE];
     let len = tx.peek(&mut packet[..bulk_in_packet_len(pending, EP_BULK_IN_SIZE)]);
-    let ret = otg::usb_send_bulk_in(&packet[..len]);
-    if ret <= 0 {
+    let Ok(sent) = otg::usb_send_bulk_in(&packet[..len]) else {
+        return;
+    };
+    if sent == 0 {
         return;
     }
-    tx.consume(ret as usize);
+    tx.consume(sent as usize);
     TX_DROPPING.store(false, Ordering::Relaxed);
     if tx.pending() > 0 {
         notify_bulk_in();
@@ -183,9 +185,10 @@ fn bulk_out_task() -> bool {
         let rx = &mut *RX.get();
         let rpos = rx.pos as usize;
         if rpos + EP_BULK_OUT_SIZE <= RX_BUF_SIZE {
-            let ret = otg::usb_read_bulk_out(&mut rx.buf[rpos..], EP_BULK_OUT_SIZE as u8);
-            if ret > 0 {
-                rx.pos = (rpos + ret as usize) as u8;
+            if let Ok(received @ 1..) =
+                otg::usb_read_bulk_out(&mut rx.buf[rpos..], EP_BULK_OUT_SIZE as u8)
+            {
+                rx.pos = (rpos + received as usize) as u8;
                 notify_bulk_out();
             }
         } else {
@@ -246,13 +249,36 @@ fn usb_do_stall() {
     }
 }
 
+/// What `usb_do_xfer` does after one EP0 packet attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XferAction {
+    /// The whole chunk moved; continue with the next chunk or finish.
+    Advance,
+    /// The hardware is not ready; save the transfer and resume on the next wake.
+    Suspend,
+    /// A new SETUP packet supersedes this transfer. Stalling would fail a control transfer the host
+    /// no longer waits on, so drop it and let the state machine service the new request.
+    Abandon,
+    /// The byte count differs from the chunk; stall EP0.
+    Stall,
+}
+
+fn xfer_action(chunk: u8, ret: Result<u8, EpError>) -> XferAction {
+    match ret {
+        Ok(moved) if moved == chunk => XferAction::Advance,
+        Ok(_) => XferAction::Stall,
+        Err(EpError::NotReady) => XferAction::Suspend,
+        Err(EpError::Interrupted) => XferAction::Abandon,
+    }
+}
+
 /// Execute an EP0 data transfer.
 ///
 /// This implements the multi-packet EP0 transfer state machine:
 /// - For SEND: sends data in EP0_SIZE chunks, with optional ZLP
 /// - For READ: reads data directly into `data` buffer, sends status ZLP
-/// - Saves state and returns if the hardware is busy (-1)
-/// - Stalls on error (-2)
+/// - Saves state and returns if the hardware is not ready
+/// - Stalls when the byte count differs from the chunk
 fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
     loop {
         let xs = if size > EP0_SIZE as u8 {
@@ -260,7 +286,7 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
         } else {
             size
         };
-        let ret: i8 = if flags & UX_READ != 0 {
+        let ret = if flags & UX_READ != 0 {
             // SAFETY: data points to a writable static with at least
             // `xs` bytes remaining (e.g. LINE_CODING).
             let buf = unsafe { core::slice::from_raw_parts_mut(data, xs as usize) };
@@ -275,19 +301,36 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
             otg::usb_send_ep0(slice)
         };
 
-        if ret == xs as i8 {
-            // SAFETY: pointer arithmetic on valid static data.
-            data = unsafe { data.add(xs as usize) };
-            size -= xs;
-            if size == 0 {
-                if flags & UX_READ != 0 {
-                    flags = UX_SEND;
-                    data = core::ptr::null_mut();
-                    continue;
+        match xfer_action(xs, ret) {
+            XferAction::Advance => {
+                // SAFETY: pointer arithmetic on valid static data.
+                data = unsafe { data.add(xs as usize) };
+                size -= xs;
+                if size == 0 {
+                    if flags & UX_READ != 0 {
+                        flags = UX_SEND;
+                        data = core::ptr::null_mut();
+                        continue;
+                    }
+                    if xs as usize == EP0_SIZE && flags & UX_SEND_ZLP != 0 {
+                        continue;
+                    }
+                    // SAFETY: `XFER` is only touched from the EP0 task context.
+                    unsafe {
+                        (*XFER.get()).flags = 0;
+                    }
+                    notify_ep0();
+                    return;
                 }
-                if xs as usize == EP0_SIZE && flags & UX_SEND_ZLP != 0 {
-                    continue;
+            }
+            XferAction::Suspend => {
+                // SAFETY: `XFER` is only touched from the EP0 task context.
+                unsafe {
+                    *XFER.get() = XferState { data, size, flags };
                 }
+                return;
+            }
+            XferAction::Abandon => {
                 // SAFETY: `XFER` is only touched from the EP0 task context.
                 unsafe {
                     (*XFER.get()).flags = 0;
@@ -295,30 +338,11 @@ fn usb_do_xfer(mut data: *mut u8, mut size: u8, mut flags: u8) {
                 notify_ep0();
                 return;
             }
-            continue;
-        }
-        if ret == -1 {
-            // SAFETY: `XFER` is only touched from the EP0 task context.
-            unsafe {
-                *XFER.get() = XferState { data, size, flags };
+            XferAction::Stall => {
+                usb_do_stall();
+                return;
             }
-            return;
         }
-        if ret == -2 {
-            // A new SETUP packet arrived while this transfer was in flight.
-            // The host has abandoned it, so drop it and let the state machine
-            // service the new request; stalling here would fail a control
-            // transfer the host is no longer waiting on, and the host would
-            // retry into the same state indefinitely.
-            // SAFETY: `XFER` is only touched from the EP0 task context.
-            unsafe {
-                (*XFER.get()).flags = 0;
-            }
-            notify_ep0();
-            return;
-        }
-        usb_do_stall();
-        return;
     }
 }
 
@@ -936,5 +960,38 @@ mod clear_feature_tests {
             source.contains("descriptors::USB_REQ_CLEAR_FEATURE => usb_req_clear_feature(&req),"),
             "usb_state_ready must dispatch CLEAR_FEATURE instead of stalling it"
         );
+    }
+}
+
+#[cfg(test)]
+mod xfer_action_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_chunk_advances_the_transfer() {
+        assert_eq!(xfer_action(64, Ok(64)), XferAction::Advance);
+    }
+
+    #[test]
+    fn a_zero_length_packet_advances_the_transfer() {
+        assert_eq!(xfer_action(0, Ok(0)), XferAction::Advance);
+    }
+
+    #[test]
+    fn a_busy_endpoint_suspends_the_transfer() {
+        assert_eq!(xfer_action(64, Err(EpError::NotReady)), XferAction::Suspend);
+    }
+
+    #[test]
+    fn a_new_setup_packet_abandons_the_transfer_without_stalling() {
+        assert_eq!(
+            xfer_action(64, Err(EpError::Interrupted)),
+            XferAction::Abandon
+        );
+    }
+
+    #[test]
+    fn a_byte_count_that_differs_from_the_chunk_stalls() {
+        assert_eq!(xfer_action(64, Ok(3)), XferAction::Stall);
     }
 }

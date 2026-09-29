@@ -256,6 +256,37 @@ fn fifo_configure() {
     debug_assert!(fpos <= OTG_FS_FIFO_WORDS);
 }
 
+/// Why an EP0 or bulk endpoint operation moved no data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpError {
+    /// The hardware has nothing to read or no room to write; retry when the endpoint wakes the
+    /// task.
+    NotReady,
+    /// A SETUP packet arrived, so the host abandoned the control transfer in flight.
+    Interrupted,
+}
+
+fn classify_ep0_read(grx: u32) -> Result<(), EpError> {
+    if grx == 0 {
+        return Err(EpError::NotReady);
+    }
+    let pktsts = (grx & GRXSTSP_PKTSTS_MSK) >> GRXSTSP_PKTSTS_POS;
+    if pktsts != 2 {
+        return Err(EpError::Interrupted);
+    }
+    Ok(())
+}
+
+fn classify_ep0_send(grx: u32, diepctl0: u32) -> Result<(), EpError> {
+    if grx != 0 {
+        return Err(EpError::Interrupted);
+    }
+    if diepctl0 & DEPCTL_EPENA != 0 {
+        return Err(EpError::NotReady);
+    }
+    Ok(())
+}
+
 /// Write a packet to a TX FIFO.
 ///
 /// Returns the number of bytes written (always `len`).
@@ -310,7 +341,7 @@ fn fifo_write_packet_fast(ep: usize, src: &[u32], len: u32) -> i32 {
 ///
 /// Returns the number of bytes transferred (capped at `max_len`).
 /// If `dest` is `None`, reads and discards the packet data.
-pub fn fifo_read_packet(dest: Option<&mut [u8]>, max_len: u8) -> i8 {
+pub fn fifo_read_packet(dest: Option<&mut [u8]>, max_len: u8) -> u8 {
     let fifo = reg(fifo_addr(0));
     let grx = readl(reg(GRXSTSP));
     let bcnt = (grx & GRXSTSP_BCNT_MSK) >> GRXSTSP_BCNT_POS;
@@ -350,7 +381,7 @@ pub fn fifo_read_packet(dest: Option<&mut [u8]>, max_len: u8) -> i8 {
         let _ = readl(fifo);
     }
 
-    xfer as i8
+    xfer as u8
 }
 
 /// Re-enable packet reception on an OUT endpoint.
@@ -399,31 +430,31 @@ fn peek_rx_queue(ep: usize) -> u32 {
 }
 
 /// Read data from the bulk OUT endpoint.
-/// Returns number of bytes read, or -1 if no data available.
-pub fn usb_read_bulk_out(data: &mut [u8], max_len: u8) -> i8 {
+/// Returns the number of bytes read, or `EpError::NotReady` if no data is available.
+pub fn usb_read_bulk_out(data: &mut [u8], max_len: u8) -> Result<u8, EpError> {
     usb_irq_disable();
     let grx = peek_rx_queue(EP_BULK_OUT);
     if grx == 0 {
         let mask = readl(reg(GINTMSK));
         writel(reg(GINTMSK), mask | GINTMSK_RXFLVLM);
         usb_irq_enable();
-        return -1;
+        return Err(EpError::NotReady);
     }
     let ret = fifo_read_packet(Some(data), max_len);
     enable_rx_endpoint(EP_BULK_OUT);
     usb_irq_enable();
-    ret
+    Ok(ret)
 }
 
 /// Send data on the bulk IN endpoint.
-/// Returns number of bytes sent, or -1 if busy.
-pub fn usb_send_bulk_in(data: &[u8]) -> i8 {
+/// Returns the number of bytes sent, or `EpError::NotReady` if the endpoint is busy.
+pub fn usb_send_bulk_in(data: &[u8]) -> Result<u8, EpError> {
     let len = data.len();
     usb_irq_disable();
     let ctl = readl(reg(diepctl(EP_BULK_IN)));
     if ctl & DEPCTL_USBAEP == 0 {
         usb_irq_enable();
-        return len as i8;
+        return Ok(len as u8);
     }
 
     let double_buf = DOUBLE_BUFFER_TX.load(Ordering::Relaxed);
@@ -437,7 +468,7 @@ pub fn usb_send_bulk_in(data: &[u8]) -> i8 {
             let msk = readl(reg(DAINTMSK));
             writel(reg(DAINTMSK), msk | (1 << EP_BULK_IN));
             usb_irq_enable();
-            return -1;
+            return Err(EpError::NotReady);
         }
         let len = if len > EP_BULK_IN_SIZE {
             EP_BULK_IN_SIZE
@@ -457,11 +488,11 @@ pub fn usb_send_bulk_in(data: &[u8]) -> i8 {
         let msk = readl(reg(DAINTMSK));
         writel(reg(DAINTMSK), msk | (1 << EP_BULK_IN));
         usb_irq_enable();
-        return len as i8;
+        return Ok(len as u8);
     }
     let ret = fifo_write_packet(EP_BULK_IN, &data[..len]);
     usb_irq_enable();
-    ret
+    Ok(ret.unsigned_abs())
 }
 
 /// Send data on the trace bulk IN endpoint.
@@ -500,25 +531,23 @@ fn trace_packet_needs_completion_wake(write_result: i8) -> bool {
 }
 
 /// Read data from EP0 (non-setup data phase).
-/// Returns bytes read, -1 if no data, -2 if transfer interrupted.
-pub fn usb_read_ep0(data: &mut [u8], max_len: u8) -> i8 {
+/// Returns the number of bytes read, `EpError::NotReady` if no data is queued, or
+/// `EpError::Interrupted` if the next packet is not a data packet.
+pub fn usb_read_ep0(data: &mut [u8], max_len: u8) -> Result<u8, EpError> {
     usb_irq_disable();
     let grx = peek_rx_queue(0);
-    if grx == 0 {
-        let mask = readl(reg(GINTMSK));
-        writel(reg(GINTMSK), mask | GINTMSK_RXFLVLM);
+    if let Err(err) = classify_ep0_read(grx) {
+        if err == EpError::NotReady {
+            let mask = readl(reg(GINTMSK));
+            writel(reg(GINTMSK), mask | GINTMSK_RXFLVLM);
+        }
         usb_irq_enable();
-        return -1;
-    }
-    let pktsts = (grx & GRXSTSP_PKTSTS_MSK) >> GRXSTSP_PKTSTS_POS;
-    if pktsts != 2 {
-        usb_irq_enable();
-        return -2;
+        return Err(err);
     }
     let ret = fifo_read_packet(Some(data), max_len);
     enable_rx_endpoint(0);
     usb_irq_enable();
-    ret
+    Ok(ret)
 }
 
 const FLUSH_POLL_LIMIT: u32 = 100_000;
@@ -593,25 +622,25 @@ pub fn usb_read_ep0_setup(data: &mut [u8], max_len: u8) -> i8 {
 }
 
 /// Send data on EP0 (control IN).
-/// Returns bytes sent, -1 if busy, -2 if transfer interrupted.
-pub fn usb_send_ep0(data: &[u8]) -> i8 {
+/// Returns the number of bytes sent, `EpError::NotReady` if the IN endpoint is busy, or
+/// `EpError::Interrupted` if a packet is waiting in the RX queue.
+pub fn usb_send_ep0(data: &[u8]) -> Result<u8, EpError> {
     usb_irq_disable();
     let grx = peek_rx_queue(0);
-    if grx != 0 {
+    let ctl = readl(reg(diepctl(0)));
+    if let Err(err) = classify_ep0_send(grx, ctl) {
+        if err == EpError::NotReady {
+            let mask = readl(reg(GINTMSK));
+            writel(reg(GINTMSK), mask | GINTMSK_RXFLVLM);
+            let msk = readl(reg(DAINTMSK));
+            writel(reg(DAINTMSK), msk | (1 << 0));
+        }
         usb_irq_enable();
-        return -2;
-    }
-    if readl(reg(diepctl(0))) & DEPCTL_EPENA != 0 {
-        let mask = readl(reg(GINTMSK));
-        writel(reg(GINTMSK), mask | GINTMSK_RXFLVLM);
-        let msk = readl(reg(DAINTMSK));
-        writel(reg(DAINTMSK), msk | (1 << 0));
-        usb_irq_enable();
-        return -1;
+        return Err(err);
     }
     let ret = fifo_write_packet(0, data);
     usb_irq_enable();
-    ret
+    Ok(ret.unsigned_abs())
 }
 
 /// Set the USB stall condition on EP0.
@@ -661,7 +690,7 @@ pub fn usb_set_address(addr: u8) {
         reg(DCFG),
         (dcfg & !DCFG_DAD_MSK) | ((addr as u32) << DCFG_DAD_POS),
     );
-    usb_send_ep0(&[]);
+    let _ = usb_send_ep0(&[]);
     cdc::notify_ep0();
 }
 
@@ -990,5 +1019,61 @@ mod halt_clear_tests {
             halt_clear_control_value(ctl),
             Some(MPSIZ_64 | DEPCTL_USBAEP | DEPCTL_SD0PID)
         );
+    }
+}
+
+#[cfg(test)]
+mod ep0_gate_tests {
+    use super::*;
+
+    const DATA_OUT: u32 = 2;
+    const SETUP_DATA: u32 = 6;
+
+    fn rx_entry(pktsts: u32) -> u32 {
+        (pktsts << GRXSTSP_PKTSTS_POS) | (1 << GRXSTSP_BCNT_POS)
+    }
+
+    #[test]
+    fn ep0_read_with_empty_rx_queue_is_not_ready() {
+        assert_eq!(classify_ep0_read(0), Err(EpError::NotReady));
+    }
+
+    #[test]
+    fn ep0_read_meeting_a_setup_packet_is_interrupted() {
+        assert_eq!(
+            classify_ep0_read(rx_entry(SETUP_DATA)),
+            Err(EpError::Interrupted)
+        );
+    }
+
+    #[test]
+    fn ep0_read_of_a_data_packet_is_accepted() {
+        assert_eq!(classify_ep0_read(rx_entry(DATA_OUT)), Ok(()));
+    }
+
+    #[test]
+    fn ep0_send_with_a_packet_waiting_is_interrupted() {
+        assert_eq!(
+            classify_ep0_send(rx_entry(SETUP_DATA), 0),
+            Err(EpError::Interrupted)
+        );
+    }
+
+    #[test]
+    fn ep0_send_with_a_packet_waiting_is_interrupted_even_when_in_busy() {
+        assert_eq!(
+            classify_ep0_send(rx_entry(SETUP_DATA), DEPCTL_EPENA),
+            Err(EpError::Interrupted)
+        );
+    }
+
+    #[test]
+    fn ep0_send_while_the_in_endpoint_is_enabled_is_not_ready() {
+        assert_eq!(classify_ep0_send(0, DEPCTL_EPENA), Err(EpError::NotReady));
+    }
+
+    #[test]
+    fn ep0_send_on_an_idle_endpoint_is_accepted() {
+        assert_eq!(classify_ep0_send(0, 0), Ok(()));
     }
 }
