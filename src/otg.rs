@@ -148,6 +148,13 @@ const TX0FD_POS: u32 = 16;
 // STM32F407 OTG FS has 320 32-bit FIFO words total. The trace build uses:
 // RX=80, EP0=16, ACM=16, CDC bulk IN=16, trace IN=32 => 160 words.
 const OTG_FS_FIFO_WORDS: u32 = 320;
+const NUM_EP: u32 = 1;
+const NUM_OUT_EP: u32 = 1;
+const TX_FIFO_WORDS: u32 = 0x10;
+#[cfg(feature = "trace")]
+const TRACE_TX_FIFO_WORDS: u32 = 0x20;
+// MPSIZ encoding: 0=64, 1=32, 2=16, 3=8 bytes
+const DEPCTL_MPSIZ_16_BYTES: u32 = 2;
 
 // ----------------------------------------------------------------
 // Static state (protected by usb_irq_disable/enable like Klipper)
@@ -251,17 +258,16 @@ pub fn check_wake() -> bool {
 // ----------------------------------------------------------------
 
 /// Setup the USB FIFOs. Matches `fifo_configure()` in usbotg.c.
-#[allow(clippy::identity_op)]
 fn fifo_configure() {
     // Reserve memory for Rx FIFO
     // Formula from Klipper: (4*NUM_EP+6) + 4*(MAX_PKT/4+1) + (2*NUM_OUT_EP)
     // NUM_EP=1, NUM_OUT_EP=1, MAX_PKT=EP_BULK_OUT_SIZE
-    let sz: u32 = (4 * 1 + 6) + 4 * ((EP_BULK_OUT_SIZE as u32 / 4) + 1) + (2 * 1);
+    let sz: u32 = (4 * NUM_EP + 6) + 4 * ((EP_BULK_OUT_SIZE as u32 / 4) + 1) + (2 * NUM_OUT_EP);
     writel(reg(GRXFSIZ), sz);
 
     // Tx FIFOs
     let mut fpos = sz;
-    let ep_size: u32 = 0x10;
+    let ep_size = TX_FIFO_WORDS;
 
     // EP0 TX FIFO
     writel(reg(DIEPTXF0), (fpos << TX0FSA_POS) | (ep_size << TX0FD_POS));
@@ -283,7 +289,7 @@ fn fifo_configure() {
 
     #[cfg(feature = "trace")]
     {
-        let trace_ep_size: u32 = 0x20;
+        let trace_ep_size = TRACE_TX_FIFO_WORDS;
         writel(
             reg(dieptxf(EP_TRACE_IN)),
             (fpos << TX0FSA_POS) | (trace_ep_size << TX0FD_POS),
@@ -936,7 +942,7 @@ pub unsafe fn init(config: &OtgConfig) {
         fifo_configure();
 
         // Configure and enable EP0
-        let mpsize_ep0: u32 = 2; // 16 bytes (encoding: 0=64, 1=32, 2=16, 3=8)
+        let mpsize_ep0 = DEPCTL_MPSIZ_16_BYTES;
         writel(reg(diepctl(0)), mpsize_ep0 | DEPCTL_SNAK);
         writel(
             reg(doeptsiz(0)),

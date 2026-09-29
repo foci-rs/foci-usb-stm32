@@ -384,9 +384,8 @@ impl StringDescriptorBuf {
         let mut buf = [0u8; 64];
         buf[0] = 4; // bLength
         buf[1] = USB_DT_STRING;
-        // USB_LANGID_ENGLISH_US = 0x0409
-        buf[2] = 0x09;
-        buf[3] = 0x04;
+        buf[2] = (USB_LANGID_ENGLISH_US & 0xff) as u8;
+        buf[3] = (USB_LANGID_ENGLISH_US >> 8) as u8;
         Self { buf, len: 4 }
     }
 
