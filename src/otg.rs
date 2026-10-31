@@ -6,7 +6,7 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 
 use crate::cdc;
 use crate::ep::{EP_ACM, EP_ACM_SIZE, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE};
@@ -47,6 +47,9 @@ const fn diepint(ep: usize) -> usize {
 }
 const fn dieptsiz(ep: usize) -> usize {
     0x910 + ep * 0x20
+}
+const fn dtxfsts(ep: usize) -> usize {
+    0x918 + ep * 0x20
 }
 
 // OUT endpoint registers (base + 0xB00 + ep * 0x20)
@@ -107,6 +110,8 @@ const DOEPTSIZ_STUPCNT_POS: u32 = 29;
 
 const DIEPINT_XFRC: u32 = 1 << 0;
 
+const DTXFSTS_INEPTFSAV_MSK: u32 = 0xFFFF;
+
 const DOEPINT_STUP: u32 = 1 << 3;
 
 const DIEPMSK_XFRCM: u32 = 1 << 0;
@@ -137,6 +142,9 @@ static USB_IRQ: AtomicU16 = AtomicU16::new(0);
 
 /// Whether double-buffer TX is enabled. Set once during init.
 static DOUBLE_BUFFER_TX: AtomicBool = AtomicBool::new(false);
+
+/// Count of trace IN loads that first had to flush stale words from an idle TxFIFO.
+static TRACE_FIFO_RESYNCS: AtomicU32 = AtomicU32::new(0);
 
 /// Wake flag: set by ISR, polled by RTIC task.
 static WAKE_FLAG: AtomicBool = AtomicBool::new(false);
@@ -498,17 +506,25 @@ pub fn usb_send_trace_in(data: &[u8]) -> i8 {
     let len = data.len().min(EP_TRACE_IN_SIZE);
     usb_irq_disable();
     let ctl = readl(reg(diepctl(EP_TRACE_IN)));
-    if ctl & DEPCTL_USBAEP == 0 {
-        // Controller not enabled. Report no accepted bytes so callers can
-        // count endpoint-not-ready pressure instead of silently losing frames.
+    let fifo_status = readl(reg(dtxfsts(EP_TRACE_IN)));
+    let flush_first = match classify_trace_in(ctl, fifo_status) {
+        TraceInState::Inactive => {
+            // Controller not enabled. Report no accepted bytes so callers can
+            // count endpoint-not-ready pressure instead of silently losing frames.
+            usb_irq_enable();
+            return 0;
+        }
+        TraceInState::Busy => {
+            let msk = readl(reg(DAINTMSK));
+            writel(reg(DAINTMSK), msk | (1 << EP_TRACE_IN));
+            usb_irq_enable();
+            return -1;
+        }
+        TraceInState::Ready { flush_first } => flush_first,
+    };
+    if flush_first && !flush_tx_fifo(EP_TRACE_IN as u32) {
         usb_irq_enable();
         return 0;
-    }
-    if ctl & DEPCTL_EPENA != 0 {
-        let msk = readl(reg(DAINTMSK));
-        writel(reg(DAINTMSK), msk | (1 << EP_TRACE_IN));
-        usb_irq_enable();
-        return -1;
     }
     let ret = fifo_write_packet(EP_TRACE_IN, &data[..len]);
     if trace_packet_needs_completion_wake(ret) {
@@ -516,7 +532,45 @@ pub fn usb_send_trace_in(data: &[u8]) -> i8 {
         writel(reg(DAINTMSK), msk | (1 << EP_TRACE_IN));
     }
     usb_irq_enable();
+    if flush_first {
+        let resyncs = TRACE_FIFO_RESYNCS.fetch_add(1, Ordering::Relaxed) + 1;
+        defmt::warn!(
+            "trace IN: flushed {} stale TxFIFO words ({} resyncs)",
+            TRACE_TX_FIFO_WORDS - (fifo_status & DTXFSTS_INEPTFSAV_MSK),
+            resyncs
+        );
+    }
     ret
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceInState {
+    Inactive,
+    Busy,
+    Ready { flush_first: bool },
+}
+
+// The core can be left with stale words in an idle TxFIFO, after which every packet sends bytes
+// written earlier and the newest tail stays behind until the next load. With no transfer armed
+// the FIFO must be empty, so anything left there is flushed rather than queued behind.
+fn classify_trace_in(ctl: u32, fifo_status: u32) -> TraceInState {
+    if ctl & DEPCTL_USBAEP == 0 {
+        return TraceInState::Inactive;
+    }
+    if ctl & DEPCTL_EPENA != 0 {
+        return TraceInState::Busy;
+    }
+    let free_words = fifo_status & DTXFSTS_INEPTFSAV_MSK;
+    TraceInState::Ready {
+        flush_first: free_words < TRACE_TX_FIFO_WORDS,
+    }
+}
+
+fn flush_tx_fifo(fifo: u32) -> bool {
+    writel(reg(GRSTCTL), (fifo << GRSTCTL_TXFNUM_POS) | GRSTCTL_TXFFLSH);
+    poll_until(FLUSH_POLL_LIMIT, || {
+        readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH == 0
+    })
 }
 
 fn trace_packet_needs_completion_wake(write_result: i8) -> bool {
@@ -563,10 +617,7 @@ fn flush_ep0_in() {
         // TXFFLSH must not be written while the core may still read the FIFO.
         return;
     }
-    writel(reg(GRSTCTL), GRSTCTL_TXFFLSH);
-    poll_until(FLUSH_POLL_LIMIT, || {
-        readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH == 0
-    });
+    flush_tx_fifo(0);
 }
 
 /// Read a SETUP packet from EP0.
@@ -900,6 +951,36 @@ pub fn is_bulk_in_configured() -> bool {
 
 #[cfg(test)]
 mod trace_tests {
+    use super::{
+        DEPCTL_EPENA, DEPCTL_USBAEP, TRACE_TX_FIFO_WORDS, TraceInState, classify_trace_in,
+    };
+
+    const FIFO_RESIDUE_14_WORDS: u32 = TRACE_TX_FIFO_WORDS - 14;
+
+    #[test]
+    fn idle_endpoint_with_fifo_residue_is_flushed_before_loading() {
+        assert_eq!(
+            classify_trace_in(DEPCTL_USBAEP, FIFO_RESIDUE_14_WORDS),
+            TraceInState::Ready { flush_first: true }
+        );
+    }
+
+    #[test]
+    fn idle_endpoint_with_empty_fifo_loads_without_flush() {
+        assert_eq!(
+            classify_trace_in(DEPCTL_USBAEP, TRACE_TX_FIFO_WORDS),
+            TraceInState::Ready { flush_first: false }
+        );
+    }
+
+    #[test]
+    fn enabled_endpoint_is_never_flushed_even_with_fifo_occupied() {
+        assert_eq!(
+            classify_trace_in(DEPCTL_USBAEP | DEPCTL_EPENA, FIFO_RESIDUE_14_WORDS),
+            TraceInState::Busy
+        );
+    }
+
     #[test]
     fn accepted_trace_packet_requires_in_completion_wake() {
         assert!(super::trace_packet_needs_completion_wake(1));
