@@ -8,8 +8,8 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::descriptors::{
-    self, CdcConfigDescriptor, DescriptorEntry, StringDescriptorBuf, UsbCdcLineCoding,
-    UsbCtrlRequest, UsbDeviceDescriptor,
+    self, DescriptorEntry, StringDescriptorBuf, UsbCdcLineCoding, UsbCtrlRequest,
+    UsbDeviceDescriptor,
 };
 use crate::ep::EP_TRACE_IN;
 use crate::ep::{EP_ACM, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE, EP0_SIZE};
@@ -360,7 +360,6 @@ const EMPTY_ENTRY: DescriptorEntry = DescriptorEntry {
 /// `set_serial_from_chip_id`, and read by `usb_req_get_descriptor`.
 struct Descriptors {
     device: UsbDeviceDescriptor,
-    config: CdcConfigDescriptor,
     trace_config: descriptors::CdcTraceConfigDescriptor,
     str_lang: StringDescriptorBuf,
     str_manufacturer: StringDescriptorBuf,
@@ -391,83 +390,6 @@ static DESCRIPTORS: RacyCell<Descriptors> = RacyCell::new(Descriptors {
         i_product: 0,
         i_serial_number: 0,
         b_num_configurations: 0,
-    },
-    config: CdcConfigDescriptor {
-        config: descriptors::UsbConfigDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            w_total_length: 0,
-            b_num_interfaces: 0,
-            b_configuration_value: 0,
-            i_configuration: 0,
-            bm_attributes: 0,
-            b_max_power: 0,
-        },
-        iface0: descriptors::UsbInterfaceDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            b_interface_number: 0,
-            b_alternate_setting: 0,
-            b_num_endpoints: 0,
-            b_interface_class: 0,
-            b_interface_sub_class: 0,
-            b_interface_protocol: 0,
-            i_interface: 0,
-        },
-        cdc_hdr: descriptors::UsbCdcHeaderDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            b_descriptor_sub_type: 0,
-            bcd_cdc: 0,
-        },
-        cdc_acm: descriptors::UsbCdcAcmDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            b_descriptor_sub_type: 0,
-            bm_capabilities: 0,
-        },
-        cdc_union: descriptors::UsbCdcUnionDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            b_descriptor_sub_type: 0,
-            b_master_interface0: 0,
-            b_slave_interface0: 0,
-        },
-        ep1: descriptors::UsbEndpointDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            b_endpoint_address: 0,
-            bm_attributes: 0,
-            w_max_packet_size: 0,
-            b_interval: 0,
-        },
-        iface1: descriptors::UsbInterfaceDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            b_interface_number: 0,
-            b_alternate_setting: 0,
-            b_num_endpoints: 0,
-            b_interface_class: 0,
-            b_interface_sub_class: 0,
-            b_interface_protocol: 0,
-            i_interface: 0,
-        },
-        ep2: descriptors::UsbEndpointDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            b_endpoint_address: 0,
-            bm_attributes: 0,
-            w_max_packet_size: 0,
-            b_interval: 0,
-        },
-        ep3: descriptors::UsbEndpointDescriptor {
-            b_length: 0,
-            b_descriptor_type: 0,
-            b_endpoint_address: 0,
-            bm_attributes: 0,
-            w_max_packet_size: 0,
-            b_interval: 0,
-        },
     },
     trace_config: descriptors::build_trace_config_descriptor(),
     str_lang: StringDescriptorBuf::lang_ids(),
@@ -731,7 +653,6 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
 
         let d = &mut *DESCRIPTORS.get();
         d.device = descriptors::build_device_descriptor(vid, pid);
-        d.config = descriptors::build_config_descriptor();
         d.trace_config = descriptors::build_trace_config_descriptor();
         d.str_lang = StringDescriptorBuf::lang_ids();
         d.str_manufacturer = StringDescriptorBuf::from_ascii(manufacturer);
