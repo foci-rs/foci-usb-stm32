@@ -8,7 +8,6 @@
 use crate::ep::{
     EP_ACM, EP_ACM_SIZE, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE, EP0_SIZE,
 };
-#[cfg(feature = "trace")]
 use crate::ep::{EP_TRACE_IN, EP_TRACE_IN_SIZE};
 
 pub const USB_DIR_OUT: u8 = 0x00;
@@ -33,7 +32,6 @@ pub const USB_DT_INTERFACE: u8 = 0x04;
 pub const USB_DT_ENDPOINT: u8 = 0x05;
 
 pub const USB_CLASS_COMM: u8 = 0x02;
-#[cfg(feature = "trace")]
 pub const USB_CLASS_VENDOR_SPECIFIC: u8 = 0xFF;
 
 pub const USB_ENDPOINT_XFER_BULK: u8 = 0x02;
@@ -185,7 +183,6 @@ pub struct CdcConfigDescriptor {
 }
 
 /// CDC configuration descriptor plus trace vendor-specific bulk IN interface.
-#[cfg(feature = "trace")]
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct CdcTraceConfigDescriptor {
@@ -304,7 +301,6 @@ pub const fn build_config_descriptor() -> CdcConfigDescriptor {
 }
 
 /// Build the CDC plus trace configuration descriptor.
-#[cfg(feature = "trace")]
 pub const fn build_trace_config_descriptor() -> CdcTraceConfigDescriptor {
     let cdc = build_config_descriptor();
     CdcTraceConfigDescriptor {
@@ -482,7 +478,6 @@ mod trace_descriptor_tests {
         assert_eq!(cfg.iface1.b_interface_number, 1);
     }
 
-    #[cfg(feature = "trace")]
     #[test]
     fn trace_config_reuses_cdc_out_endpoint_number_as_vendor_bulk_in() {
         let cfg = build_trace_config_descriptor();

@@ -1,5 +1,3 @@
-#![cfg(feature = "trace")]
-
 use crate::ep::EP_TRACE_IN_SIZE;
 use crate::otg;
 

@@ -10,7 +10,6 @@ use core::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 
 use crate::cdc;
 use crate::ep::{EP_ACM, EP_ACM_SIZE, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE};
-#[cfg(feature = "trace")]
 use crate::ep::{EP_TRACE_IN, EP_TRACE_IN_SIZE};
 use crate::sync::RacyCell;
 
@@ -126,7 +125,6 @@ const OTG_FS_FIFO_WORDS: u32 = 320;
 const NUM_EP: u32 = 1;
 const NUM_OUT_EP: u32 = 1;
 const TX_FIFO_WORDS: u32 = 0x10;
-#[cfg(feature = "trace")]
 const TRACE_TX_FIFO_WORDS: u32 = 0x20;
 // MPSIZ encoding: 0=64, 1=32, 2=16, 3=8 bytes
 const DEPCTL_MPSIZ_16_BYTES: u32 = 2;
@@ -243,15 +241,12 @@ fn fifo_configure() {
     );
     fpos += ep_size;
 
-    #[cfg(feature = "trace")]
-    {
-        let trace_ep_size = TRACE_TX_FIFO_WORDS;
-        writel(
-            reg(dieptxf(EP_TRACE_IN)),
-            (fpos << TX0FSA_POS) | (trace_ep_size << TX0FD_POS),
-        );
-        fpos += trace_ep_size;
-    }
+    let trace_ep_size = TRACE_TX_FIFO_WORDS;
+    writel(
+        reg(dieptxf(EP_TRACE_IN)),
+        (fpos << TX0FSA_POS) | (trace_ep_size << TX0FD_POS),
+    );
+    fpos += trace_ep_size;
 
     debug_assert!(fpos <= OTG_FS_FIFO_WORDS);
 }
@@ -499,7 +494,6 @@ pub fn usb_send_bulk_in(data: &[u8]) -> Result<u8, EpError> {
 ///
 /// Returns number of bytes sent, or -1 if busy. The caller is responsible for
 /// splitting larger frames into full-speed packets.
-#[cfg(feature = "trace")]
 pub fn usb_send_trace_in(data: &[u8]) -> i8 {
     let len = data.len().min(EP_TRACE_IN_SIZE);
     usb_irq_disable();
@@ -525,7 +519,6 @@ pub fn usb_send_trace_in(data: &[u8]) -> i8 {
     ret
 }
 
-#[cfg(feature = "trace")]
 fn trace_packet_needs_completion_wake(write_result: i8) -> bool {
     write_result > 0
 }
@@ -744,29 +737,26 @@ pub fn usb_set_configure() {
     );
     while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
 
-    #[cfg(feature = "trace")]
-    {
-        writel(
-            reg(dieptsiz(EP_TRACE_IN)),
-            EP_TRACE_IN_SIZE as u32 | (1 << DEPTSIZ_PKTCNT_POS),
-        );
-        writel(
-            reg(diepctl(EP_TRACE_IN)),
-            DEPCTL_SNAK
-                | DEPCTL_EPDIS
-                | DEPCTL_USBAEP
-                | (0x02 << DEPCTL_EPTYP_POS)
-                | DEPCTL_SD0PID
-                | ((EP_TRACE_IN as u32) << DIEPCTL_TXFNUM_POS)
-                | ((EP_TRACE_IN_SIZE as u32) << DEPCTL_MPSIZ_POS),
-        );
-        while readl(reg(diepctl(EP_TRACE_IN))) & DEPCTL_EPENA != 0 {}
-        writel(
-            reg(GRSTCTL),
-            ((EP_TRACE_IN as u32) << GRSTCTL_TXFNUM_POS) | GRSTCTL_TXFFLSH,
-        );
-        while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
-    }
+    writel(
+        reg(dieptsiz(EP_TRACE_IN)),
+        EP_TRACE_IN_SIZE as u32 | (1 << DEPTSIZ_PKTCNT_POS),
+    );
+    writel(
+        reg(diepctl(EP_TRACE_IN)),
+        DEPCTL_SNAK
+            | DEPCTL_EPDIS
+            | DEPCTL_USBAEP
+            | (0x02 << DEPCTL_EPTYP_POS)
+            | DEPCTL_SD0PID
+            | ((EP_TRACE_IN as u32) << DIEPCTL_TXFNUM_POS)
+            | ((EP_TRACE_IN_SIZE as u32) << DEPCTL_MPSIZ_POS),
+    );
+    while readl(reg(diepctl(EP_TRACE_IN))) & DEPCTL_EPENA != 0 {}
+    writel(
+        reg(GRSTCTL),
+        ((EP_TRACE_IN as u32) << GRSTCTL_TXFNUM_POS) | GRSTCTL_TXFFLSH,
+    );
+    while readl(reg(GRSTCTL)) & GRSTCTL_TXFFLSH != 0 {}
 
     // SAFETY: `TX_BUF` is protected by the surrounding
     // `usb_irq_disable`/_enable window; the ISR cannot preempt.
@@ -818,7 +808,6 @@ pub fn irq_handler() {
                 }
             }
         }
-        #[cfg(feature = "trace")]
         if pend & (1 << EP_TRACE_IN) != 0 {
             notify_wake();
         }
@@ -912,7 +901,6 @@ pub fn is_bulk_in_configured() -> bool {
 #[cfg(test)]
 mod trace_tests {
     #[test]
-    #[cfg(feature = "trace")]
     fn accepted_trace_packet_requires_in_completion_wake() {
         assert!(super::trace_packet_needs_completion_wake(1));
         assert!(super::trace_packet_needs_completion_wake(64));

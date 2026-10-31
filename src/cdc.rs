@@ -11,7 +11,6 @@ use crate::descriptors::{
     self, CdcConfigDescriptor, DescriptorEntry, StringDescriptorBuf, UsbCdcLineCoding,
     UsbCtrlRequest, UsbDeviceDescriptor,
 };
-#[cfg(feature = "trace")]
 use crate::ep::EP_TRACE_IN;
 use crate::ep::{EP_ACM, EP_BULK_IN, EP_BULK_IN_SIZE, EP_BULK_OUT, EP_BULK_OUT_SIZE, EP0_SIZE};
 use crate::otg::{self, EpError};
@@ -362,7 +361,6 @@ const EMPTY_ENTRY: DescriptorEntry = DescriptorEntry {
 struct Descriptors {
     device: UsbDeviceDescriptor,
     config: CdcConfigDescriptor,
-    #[cfg(feature = "trace")]
     trace_config: descriptors::CdcTraceConfigDescriptor,
     str_lang: StringDescriptorBuf,
     str_manufacturer: StringDescriptorBuf,
@@ -471,7 +469,6 @@ static DESCRIPTORS: RacyCell<Descriptors> = RacyCell::new(Descriptors {
             b_interval: 0,
         },
     },
-    #[cfg(feature = "trace")]
     trace_config: descriptors::build_trace_config_descriptor(),
     str_lang: StringDescriptorBuf::lang_ids(),
     str_manufacturer: StringDescriptorBuf::from_ascii("Klipper"),
@@ -551,7 +548,6 @@ fn clear_endpoint_halt_target(req: &UsbCtrlRequest) -> Option<(usize, bool)> {
     let ep = (address & 0x0F) as usize;
     match (ep, is_in) {
         (EP_BULK_IN, true) | (EP_ACM, true) | (EP_BULK_OUT, false) => Some((ep, is_in)),
-        #[cfg(feature = "trace")]
         (EP_TRACE_IN, true) => Some((ep, is_in)),
         _ => None,
     }
@@ -736,23 +732,14 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         let d = &mut *DESCRIPTORS.get();
         d.device = descriptors::build_device_descriptor(vid, pid);
         d.config = descriptors::build_config_descriptor();
-        #[cfg(feature = "trace")]
-        {
-            d.trace_config = descriptors::build_trace_config_descriptor();
-        }
+        d.trace_config = descriptors::build_trace_config_descriptor();
         d.str_lang = StringDescriptorBuf::lang_ids();
         d.str_manufacturer = StringDescriptorBuf::from_ascii(manufacturer);
         d.str_product = StringDescriptorBuf::from_ascii(product);
         d.str_serial = StringDescriptorBuf::from_ascii(serial);
 
         let device_ptr = (&raw const d.device) as *const u8;
-        #[cfg(not(feature = "trace"))]
-        let config_ptr = (&raw const d.config) as *const u8;
-        #[cfg(not(feature = "trace"))]
-        let config_size = core::mem::size_of::<CdcConfigDescriptor>() as u8;
-        #[cfg(feature = "trace")]
         let config_ptr = (&raw const d.trace_config) as *const u8;
-        #[cfg(feature = "trace")]
         let config_size = core::mem::size_of::<descriptors::CdcTraceConfigDescriptor>() as u8;
         let (lang_ptr, lang_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_lang);
         let (mfr_ptr, mfr_len) =
@@ -915,7 +902,6 @@ mod clear_feature_tests {
         assert_eq!(clear_endpoint_halt_target(&req), Some((EP_ACM, true)));
     }
 
-    #[cfg(feature = "trace")]
     #[test]
     fn trace_in_shares_endpoint_number_with_bulk_out() {
         use crate::ep::EP_TRACE_IN;

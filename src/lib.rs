@@ -11,7 +11,6 @@ pub mod cdc;
 pub mod descriptors;
 pub mod otg;
 mod sync;
-#[cfg(feature = "trace")]
 pub mod trace;
 mod tx_ring;
 
@@ -43,11 +42,9 @@ pub mod ep {
     /// Reuse endpoint number 2 in the opposite direction from CDC bulk OUT.
     /// STM32 OTG has separate IN and OUT endpoint registers; this keeps the
     /// trace interface within the F407's endpoint-number range.
-    #[cfg(feature = "trace")]
     pub const EP_TRACE_IN: usize = EP_BULK_OUT;
 
     /// Trace bulk IN endpoint packet size.
-    #[cfg(feature = "trace")]
     pub const EP_TRACE_IN_SIZE: usize = 64;
 }
 
@@ -136,7 +133,6 @@ pub fn tx_write(data: &[u8]) {
 ///
 /// Returns the number of bytes accepted by the USB controller, or -1 if the
 /// trace endpoint is busy and the caller should retry later.
-#[cfg(feature = "trace")]
 pub fn trace_write(data: &[u8]) -> i8 {
     trace::send_trace_in(data)
 }
