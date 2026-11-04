@@ -180,12 +180,6 @@ pub fn rx_consume(len: usize) {
 /// Process bulk OUT reception.
 ///
 /// Returns true if receive data is available for protocol processing.
-///
-/// Every successful hardware read re-notifies bulk OUT, including a
-/// zero-length packet: a read leaves the RXFLVL interrupt masked, and only a
-/// further read that finds the FIFO empty re-arms it. A zero-length packet
-/// that did not re-notify would consume the wake and leave the next packet
-/// sitting in the FIFO with no interrupt and nothing scheduled to read it.
 fn bulk_out_task() -> bool {
     // SAFETY: `RX` is task-context-owned; the ISR only sets the wake flag.
     if !check_bulk_out_wake() {
@@ -920,7 +914,6 @@ mod rx_consume_tests {
 
     use super::*;
 
-    /// Serialises the tests that touch the shared `RX` state.
     static RX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fill(bytes: &[u8]) {
