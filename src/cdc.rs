@@ -180,6 +180,12 @@ pub fn rx_consume(len: usize) {
 /// Process bulk OUT reception.
 ///
 /// Returns true if receive data is available for protocol processing.
+///
+/// Every successful hardware read re-notifies bulk OUT, including a
+/// zero-length packet: a read leaves the RXFLVL interrupt masked, and only a
+/// further read that finds the FIFO empty re-arms it. A zero-length packet
+/// that did not re-notify would consume the wake and leave the next packet
+/// sitting in the FIFO with no interrupt and nothing scheduled to read it.
 fn bulk_out_task() -> bool {
     // SAFETY: `RX` is task-context-owned; the ISR only sets the wake flag.
     if !check_bulk_out_wake() {
@@ -189,7 +195,7 @@ fn bulk_out_task() -> bool {
         let rx = &mut *RX.get();
         let rpos = rx.pos as usize;
         if rpos + EP_BULK_OUT_SIZE <= RX_BUF_SIZE {
-            if let Ok(received @ 1..) =
+            if let Ok(received) =
                 otg::usb_read_bulk_out(&mut rx.buf[rpos..], EP_BULK_OUT_SIZE as u8)
             {
                 rx.pos = (rpos + received as usize) as u8;
