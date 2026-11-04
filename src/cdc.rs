@@ -150,6 +150,11 @@ pub fn rx_data() -> &'static [u8] {
 /// Mark `len` bytes as consumed from the RX buffer. The consumed bytes
 /// are removed from the front and remaining data is shifted down.
 ///
+/// Re-notifies bulk OUT only when a block was actually consumed and bytes
+/// remain, matching Klipper's `usb_bulk_out_task`. A zero-length consume
+/// means the protocol needs more data; notifying on it would make a pump
+/// that re-runs on pending notifies spin on an incomplete frame.
+///
 /// # Safety
 ///
 /// Must be called from the same RTIC task context that calls `poll()`.
@@ -167,7 +172,7 @@ pub fn rx_consume(len: usize) {
             rx.buf[i] = rx.buf[len + i];
         }
         rx.pos = needcopy as u8;
-        if needcopy > 0 {
+        if len > 0 {
             notify_bulk_out();
         }
     }
@@ -993,5 +998,54 @@ mod xfer_action_tests {
     #[test]
     fn a_byte_count_that_differs_from_the_chunk_stalls() {
         assert_eq!(xfer_action(64, Ok(3)), XferAction::Stall);
+    }
+}
+
+#[cfg(test)]
+mod rx_consume_tests {
+    extern crate std;
+
+    use super::*;
+
+    /// Serialises the tests that touch the shared `RX` state.
+    static RX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn fill(bytes: &[u8]) {
+        // SAFETY: tests hold `RX_LOCK`, so this is the only access.
+        unsafe {
+            let rx = &mut *RX.get();
+            rx.buf[..bytes.len()].copy_from_slice(bytes);
+            rx.pos = bytes.len() as u8;
+        }
+    }
+
+    #[test]
+    fn consuming_a_block_with_a_remainder_renotifies_bulk_out() {
+        let _guard = RX_LOCK.lock().unwrap();
+        fill(&[1, 2, 3, 4, 5]);
+        let _ = check_bulk_out_wake();
+        rx_consume(3);
+        assert_eq!(rx_data(), &[4, 5]);
+        assert!(check_bulk_out_wake());
+    }
+
+    #[test]
+    fn consuming_nothing_leaves_the_data_and_does_not_notify() {
+        let _guard = RX_LOCK.lock().unwrap();
+        fill(&[1, 2, 3]);
+        let _ = check_bulk_out_wake();
+        rx_consume(0);
+        assert_eq!(rx_data(), &[1, 2, 3]);
+        assert!(!check_bulk_out_wake());
+    }
+
+    #[test]
+    fn consuming_everything_empties_without_notify() {
+        let _guard = RX_LOCK.lock().unwrap();
+        fill(&[1, 2]);
+        let _ = check_bulk_out_wake();
+        rx_consume(2);
+        assert!(rx_data().is_empty());
+        assert!(!check_bulk_out_wake());
     }
 }
