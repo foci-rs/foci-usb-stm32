@@ -23,7 +23,6 @@ missing_panics_doc = "allow"
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 # Lints that fire in this crate today; drop an entry once its findings are fixed.
-cast_lossless = "allow"
 cast_possible_wrap = "allow"
 doc_markdown = "allow"
 inline_always = "allow"

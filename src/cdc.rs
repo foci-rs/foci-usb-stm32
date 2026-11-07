@@ -433,7 +433,7 @@ fn usb_req_get_descriptor(req: &UsbCtrlRequest) {
     let mut flags = UX_SEND;
     if size > req.w_length as u8 {
         size = req.w_length as u8;
-    } else if (size as u16) < req.w_length {
+    } else if u16::from(size) < req.w_length {
         flags |= UX_SEND_ZLP;
     }
     usb_do_xfer(desc as *mut u8, size, flags);
@@ -468,10 +468,10 @@ fn clear_endpoint_halt_target(req: &UsbCtrlRequest) -> Option<(usize, bool)> {
         return None;
     }
     let address = req.w_index;
-    if address & !(descriptors::USB_DIR_IN as u16 | 0x0F) != 0 {
+    if address & !(u16::from(descriptors::USB_DIR_IN) | 0x0F) != 0 {
         return None;
     }
-    let is_in = address & descriptors::USB_DIR_IN as u16 != 0;
+    let is_in = address & u16::from(descriptors::USB_DIR_IN) != 0;
     let ep = (address & 0x0F) as usize;
     match (ep, is_in) {
         (EP_BULK_IN, true) | (EP_ACM, true) | (EP_BULK_OUT, false) => Some((ep, is_in)),
@@ -675,7 +675,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
 
         let mut idx = 0;
         d.table[idx] = DescriptorEntry {
-            w_value: (descriptors::USB_DT_DEVICE as u16) << 8,
+            w_value: u16::from(descriptors::USB_DT_DEVICE) << 8,
             w_index: 0,
             data: device_ptr,
             size: core::mem::size_of::<UsbDeviceDescriptor>() as u8,
@@ -683,7 +683,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         idx += 1;
 
         d.table[idx] = DescriptorEntry {
-            w_value: (descriptors::USB_DT_CONFIG as u16) << 8,
+            w_value: u16::from(descriptors::USB_DT_CONFIG) << 8,
             w_index: 0,
             data: config_ptr,
             size: config_size,
@@ -691,7 +691,7 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         idx += 1;
 
         d.table[idx] = DescriptorEntry {
-            w_value: (descriptors::USB_DT_STRING as u16) << 8,
+            w_value: u16::from(descriptors::USB_DT_STRING) << 8,
             w_index: 0,
             data: lang_ptr,
             size: lang_len,
@@ -699,8 +699,8 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         idx += 1;
 
         d.table[idx] = DescriptorEntry {
-            w_value: (descriptors::USB_DT_STRING as u16) << 8
-                | descriptors::USB_STR_ID_MANUFACTURER as u16,
+            w_value: u16::from(descriptors::USB_DT_STRING) << 8
+                | u16::from(descriptors::USB_STR_ID_MANUFACTURER),
             w_index: descriptors::USB_LANGID_ENGLISH_US,
             data: mfr_ptr,
             size: mfr_len,
@@ -708,8 +708,8 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         idx += 1;
 
         d.table[idx] = DescriptorEntry {
-            w_value: (descriptors::USB_DT_STRING as u16) << 8
-                | descriptors::USB_STR_ID_PRODUCT as u16,
+            w_value: u16::from(descriptors::USB_DT_STRING) << 8
+                | u16::from(descriptors::USB_STR_ID_PRODUCT),
             w_index: descriptors::USB_LANGID_ENGLISH_US,
             data: prod_ptr,
             size: prod_len,
@@ -717,8 +717,8 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         idx += 1;
 
         d.table[idx] = DescriptorEntry {
-            w_value: (descriptors::USB_DT_STRING as u16) << 8
-                | descriptors::USB_STR_ID_SERIAL as u16,
+            w_value: u16::from(descriptors::USB_DT_STRING) << 8
+                | u16::from(descriptors::USB_STR_ID_SERIAL),
             w_index: descriptors::USB_LANGID_ENGLISH_US,
             data: ser_ptr,
             size: ser_len,
@@ -759,7 +759,7 @@ pub unsafe fn set_serial_from_chip_id(id: &[u8], strlen: usize) {
         let d = &mut *DESCRIPTORS.get();
         descriptors::fill_serial_from_chip_id(&mut d.str_serial, strlen, id);
         let expected_wvalue =
-            (descriptors::USB_DT_STRING as u16) << 8 | descriptors::USB_STR_ID_SERIAL as u16;
+            u16::from(descriptors::USB_DT_STRING) << 8 | u16::from(descriptors::USB_STR_ID_SERIAL);
         let (ser_ptr, ser_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_serial);
         for entry in d.table.iter_mut().take(d.count) {
             if entry.w_value == expected_wvalue {
@@ -812,7 +812,7 @@ mod clear_feature_tests {
 
     #[test]
     fn bulk_in_address_resolves_to_in_endpoint() {
-        let req = clear_halt(EP_BULK_IN as u16 | USB_DIR_IN as u16);
+        let req = clear_halt(EP_BULK_IN as u16 | u16::from(USB_DIR_IN));
         assert_eq!(clear_endpoint_halt_target(&req), Some((EP_BULK_IN, true)));
     }
 
@@ -824,14 +824,14 @@ mod clear_feature_tests {
 
     #[test]
     fn acm_notification_address_resolves_to_in_endpoint() {
-        let req = clear_halt(EP_ACM as u16 | USB_DIR_IN as u16);
+        let req = clear_halt(EP_ACM as u16 | u16::from(USB_DIR_IN));
         assert_eq!(clear_endpoint_halt_target(&req), Some((EP_ACM, true)));
     }
 
     #[test]
     fn trace_in_shares_endpoint_number_with_bulk_out() {
         use crate::ep::EP_TRACE_IN;
-        let req = clear_halt(EP_TRACE_IN as u16 | USB_DIR_IN as u16);
+        let req = clear_halt(EP_TRACE_IN as u16 | u16::from(USB_DIR_IN));
         assert_eq!(clear_endpoint_halt_target(&req), Some((EP_TRACE_IN, true)));
         assert_eq!(
             clear_endpoint_halt_target(&clear_halt(EP_BULK_OUT as u16)),
@@ -841,14 +841,14 @@ mod clear_feature_tests {
 
     #[test]
     fn other_feature_selector_is_rejected() {
-        let mut req = clear_halt(EP_BULK_IN as u16 | USB_DIR_IN as u16);
+        let mut req = clear_halt(EP_BULK_IN as u16 | u16::from(USB_DIR_IN));
         req.w_value = 1;
         assert_eq!(clear_endpoint_halt_target(&req), None);
     }
 
     #[test]
     fn non_endpoint_recipient_is_rejected() {
-        let mut req = clear_halt(EP_BULK_IN as u16 | USB_DIR_IN as u16);
+        let mut req = clear_halt(EP_BULK_IN as u16 | u16::from(USB_DIR_IN));
         req.b_request_type = 0x00;
         assert_eq!(clear_endpoint_halt_target(&req), None);
     }

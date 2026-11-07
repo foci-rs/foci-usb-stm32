@@ -348,8 +348,8 @@ pub fn fifo_read_packet(dest: Option<&mut [u8]>, max_len: u8) -> u8 {
     let fifo = reg(fifo_addr(0));
     let grx = readl(reg(GRXSTSP));
     let bcnt = (grx & GRXSTSP_BCNT_MSK) >> GRXSTSP_BCNT_POS;
-    let xfer = if bcnt > max_len as u32 {
-        max_len as u32
+    let xfer = if bcnt > u32::from(max_len) {
+        u32::from(max_len)
     } else {
         bcnt
     };
@@ -732,7 +732,7 @@ pub fn usb_set_address(addr: u8) {
     let dcfg = readl(reg(DCFG));
     writel(
         reg(DCFG),
-        (dcfg & !DCFG_DAD_MSK) | ((addr as u32) << DCFG_DAD_POS),
+        (dcfg & !DCFG_DAD_MSK) | (u32::from(addr) << DCFG_DAD_POS),
     );
     let _ = usb_send_ep0(&[]);
     cdc::notify_ep0();
@@ -904,7 +904,7 @@ pub unsafe fn init(config: &OtgConfig) {
 
         writel(
             reg(GUSBCFG),
-            GUSBCFG_FDMOD | GUSBCFG_PHYSEL | ((config.trdt as u32) << GUSBCFG_TRDT_POS),
+            GUSBCFG_FDMOD | GUSBCFG_PHYSEL | (u32::from(config.trdt) << GUSBCFG_TRDT_POS),
         );
         let dcfg = readl(reg(DCFG));
         writel(reg(DCFG), dcfg | (3 << DCFG_DSPD_POS));
