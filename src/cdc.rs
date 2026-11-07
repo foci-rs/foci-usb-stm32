@@ -473,7 +473,7 @@ fn clear_endpoint_halt_target(req: &UsbCtrlRequest) -> Option<(usize, bool)> {
     let is_in = address & u16::from(descriptors::USB_DIR_IN) != 0;
     let ep = (address & 0x0F) as usize;
     match (ep, is_in) {
-        (EP_BULK_IN, true) | (EP_ACM, true) | (EP_BULK_OUT, false) => Some((ep, is_in)),
+        (EP_BULK_IN | EP_ACM, true) | (EP_BULK_OUT, false) => Some((ep, is_in)),
         (EP_TRACE_IN, true) => Some((ep, is_in)),
         _ => None,
     }
