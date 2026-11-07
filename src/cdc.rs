@@ -436,7 +436,7 @@ fn usb_req_get_descriptor(req: &UsbCtrlRequest) {
     } else if u16::from(size) < req.w_length {
         flags |= UX_SEND_ZLP;
     }
-    usb_do_xfer(desc as *mut u8, size, flags);
+    usb_do_xfer(desc.cast_mut(), size, flags);
 }
 
 /// Handle `SET_ADDRESS` request.
