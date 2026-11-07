@@ -421,12 +421,11 @@ fn usb_req_get_descriptor(req: &UsbCtrlRequest) {
                 found = Some((entry.data, entry.size));
             }
         }
-        match found {
-            Some(v) => v,
-            None => {
-                usb_do_stall();
-                return;
-            }
+        if let Some(v) = found {
+            v
+        } else {
+            usb_do_stall();
+            return;
         }
     };
 
