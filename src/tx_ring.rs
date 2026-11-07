@@ -86,7 +86,7 @@ impl<const N: usize> TxRing<N> {
     fn copy_in(&self, start: u32, data: &[u8]) {
         let index = start as usize % N;
         let first = data.len().min(N - index);
-        let base = self.buf.get() as *mut u8;
+        let base = self.buf.get().cast::<u8>();
         // SAFETY: `reserve` handed this producer exclusive ownership of
         // `[start, start + data.len())`; the consumer does not read it before
         // `publish` and no other producer is given an overlapping range.

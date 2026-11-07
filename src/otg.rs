@@ -485,7 +485,7 @@ pub fn usb_send_bulk_in(data: &[u8]) -> Result<u8, EpError> {
         unsafe {
             let tx = &mut *TX_BUF.get();
             tx.data[blocks - 1] = 0;
-            core::ptr::copy_nonoverlapping(data.as_ptr(), tx.data.as_mut_ptr() as *mut u8, len);
+            core::ptr::copy_nonoverlapping(data.as_ptr(), tx.data.as_mut_ptr().cast::<u8>(), len);
             tx.len = len as u32;
         }
         let msk = readl(reg(DAINTMSK));

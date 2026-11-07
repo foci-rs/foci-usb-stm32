@@ -409,7 +409,7 @@ impl StringDescriptorBuf {
         // SAFETY: caller upholds the safety contract: no live mutable
         // reference to *this while the returned pointer is used.
         unsafe {
-            let buf_ptr = core::ptr::addr_of!((*this).buf) as *const u8;
+            let buf_ptr = core::ptr::addr_of!((*this).buf).cast::<u8>();
             let len = core::ptr::addr_of!((*this).len).read();
             (buf_ptr, len)
         }
@@ -459,7 +459,7 @@ mod trace_descriptor_tests {
     use super::*;
 
     fn bytes<T>(value: &T) -> &[u8] {
-        let ptr = value as *const T as *const u8;
+        let ptr = (value as *const T).cast::<u8>();
         // SAFETY: `value` is valid for `size_of::<T>()` bytes and this helper
         // only reinterprets it as immutable bytes for descriptor layout tests.
         unsafe { core::slice::from_raw_parts(ptr, core::mem::size_of::<T>()) }

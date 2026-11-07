@@ -567,7 +567,7 @@ fn usb_req_set_line_coding(req: &UsbCtrlRequest) {
     // SAFETY: `LINE` is only touched from the EP0 task context; the
     // raw pointer is valid for the duration of `usb_do_xfer`.
     let ptr = unsafe { &raw mut (*LINE.get()).coding };
-    usb_do_xfer(ptr as *mut u8, line_coding_size as u8, UX_READ);
+    usb_do_xfer(ptr.cast::<u8>(), line_coding_size as u8, UX_READ);
     check_reboot();
 }
 
@@ -664,8 +664,8 @@ pub unsafe fn init(vid: u16, pid: u16, manufacturer: &str, product: &str, serial
         d.str_product = StringDescriptorBuf::from_ascii(product);
         d.str_serial = StringDescriptorBuf::from_ascii(serial);
 
-        let device_ptr = (&raw const d.device) as *const u8;
-        let config_ptr = (&raw const d.trace_config) as *const u8;
+        let device_ptr = (&raw const d.device).cast::<u8>();
+        let config_ptr = (&raw const d.trace_config).cast::<u8>();
         let config_size = core::mem::size_of::<descriptors::CdcTraceConfigDescriptor>() as u8;
         let (lang_ptr, lang_len) = StringDescriptorBuf::raw_ptr_and_len(&raw const d.str_lang);
         let (mfr_ptr, mfr_len) =
