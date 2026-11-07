@@ -14,7 +14,7 @@ mod sync;
 pub mod trace;
 mod tx_ring;
 
-/// Endpoint constants (from usb_cdc_ep.h)
+/// Endpoint constants (from `usb_cdc_ep.h`)
 pub mod ep {
     /// EP0 max packet size. Klipper uses 16, not the typical 64.
     pub const EP0_SIZE: usize = 16;

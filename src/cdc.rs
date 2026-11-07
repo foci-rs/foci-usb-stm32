@@ -67,7 +67,7 @@ static TX_DROPPING: AtomicBool = AtomicBool::new(false);
 /// sending protocol responses over USB.
 ///
 /// If the buffer is full, the data is dropped (matching Klipper behavior
-/// in console_sendf when buffer is full). The first drop after the USB
+/// in `console_sendf` when buffer is full). The first drop after the USB
 /// drain last freed space logs a `defmt::warn!` with the running drop count.
 ///
 /// Safe to call from any task or interrupt priority.
@@ -226,7 +226,7 @@ static XFER: RacyCell<XferState> = RacyCell::new(XferState {
 });
 
 /// CDC line state: baud/format/parity/data-bits plus the DTR/RTS control
-/// bits. Written by SET_LINE_CODING / SET_CONTROL_LINE_STATE handlers and
+/// bits. Written by `SET_LINE_CODING` / `SET_CONTROL_LINE_STATE` handlers and
 /// read by the Katapult reboot detection, all from the same task context.
 struct LineState {
     coding: UsbCdcLineCoding,
@@ -279,7 +279,7 @@ fn xfer_action(chunk: u8, ret: Result<u8, EpError>) -> XferAction {
 /// Execute an EP0 data transfer.
 ///
 /// This implements the multi-packet EP0 transfer state machine:
-/// - For SEND: sends data in EP0_SIZE chunks, with optional ZLP
+/// - For SEND: sends data in `EP0_SIZE` chunks, with optional ZLP
 /// - For READ: reads data directly into `data` buffer, sends status ZLP
 /// - Saves state and returns if the hardware is not ready
 /// - Stalls when the byte count differs from the chunk
@@ -375,7 +375,7 @@ struct Descriptors {
 }
 
 /// USB descriptor table. Initialized once by `init()` and afterwards
-/// read by the EP0 task in response to GET_DESCRIPTOR requests.
+/// read by the EP0 task in response to `GET_DESCRIPTOR` requests.
 /// `set_serial_from_chip_id` is the only other writer; it must run
 /// before USB enumeration reads the serial string (see its safety
 /// contract).
@@ -405,7 +405,7 @@ static DESCRIPTORS: RacyCell<Descriptors> = RacyCell::new(Descriptors {
     count: 0,
 });
 
-/// Handle GET_DESCRIPTOR request.
+/// Handle `GET_DESCRIPTOR` request.
 fn usb_req_get_descriptor(req: &UsbCtrlRequest) {
     if req.b_request_type != descriptors::USB_DIR_IN {
         usb_do_stall();
@@ -439,7 +439,7 @@ fn usb_req_get_descriptor(req: &UsbCtrlRequest) {
     usb_do_xfer(desc as *mut u8, size, flags);
 }
 
-/// Handle SET_ADDRESS request.
+/// Handle `SET_ADDRESS` request.
 fn usb_req_set_address(req: &UsbCtrlRequest) {
     if req.b_request_type != 0 || req.w_index != 0 || req.w_length != 0 {
         usb_do_stall();
@@ -448,7 +448,7 @@ fn usb_req_set_address(req: &UsbCtrlRequest) {
     otg::usb_set_address(req.w_value as u8);
 }
 
-/// Handle SET_CONFIGURATION request.
+/// Handle `SET_CONFIGURATION` request.
 fn usb_req_set_configuration(req: &UsbCtrlRequest) {
     if req.b_request_type != 0 || req.w_value != 1 || req.w_index != 0 || req.w_length != 0 {
         usb_do_stall();
@@ -503,7 +503,7 @@ const KATAPULT_REQUEST: u64 = 0x5984_E3FA_6CA1_589B;
 /// Set once during `detect_bootloader()`, read by `check_reboot()`.
 static HAS_BOOTLOADER: AtomicBool = AtomicBool::new(false);
 
-/// Probe for a Katapult bootloader at KATAPULT_BOOT_ADDRESS.
+/// Probe for a Katapult bootloader at `KATAPULT_BOOT_ADDRESS`.
 /// Call once during init, before USB traffic starts.
 fn detect_bootloader() {
     // SAFETY: The vector table at 0x08000000 is always readable.
@@ -553,7 +553,7 @@ fn check_reboot() {
     }
 }
 
-/// Handle SET_LINE_CODING request.
+/// Handle `SET_LINE_CODING` request.
 fn usb_req_set_line_coding(req: &UsbCtrlRequest) {
     let line_coding_size = core::mem::size_of::<UsbCdcLineCoding>() as u16;
     if req.b_request_type != 0x21
@@ -571,7 +571,7 @@ fn usb_req_set_line_coding(req: &UsbCtrlRequest) {
     check_reboot();
 }
 
-/// Handle GET_LINE_CODING request.
+/// Handle `GET_LINE_CODING` request.
 fn usb_req_get_line_coding(req: &UsbCtrlRequest) {
     let line_coding_size = core::mem::size_of::<UsbCdcLineCoding>() as u16;
     if req.b_request_type != 0xA1
@@ -588,7 +588,7 @@ fn usb_req_get_line_coding(req: &UsbCtrlRequest) {
     usb_do_xfer(ptr as *mut u8, line_coding_size as u8, UX_SEND);
 }
 
-/// Handle SET_CONTROL_LINE_STATE request.
+/// Handle `SET_CONTROL_LINE_STATE` request.
 fn usb_req_set_line(req: &UsbCtrlRequest) {
     if req.b_request_type != 0x21 || req.w_index != 0 || req.w_length != 0 {
         usb_do_stall();
@@ -782,7 +782,7 @@ pub fn poll() -> bool {
 }
 
 /// Check if the USB device is configured (endpoints active).
-/// Returns true after the host sends SET_CONFIGURATION.
+/// Returns true after the host sends `SET_CONFIGURATION`.
 pub fn is_configured() -> bool {
     otg::is_bulk_in_configured()
 }

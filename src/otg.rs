@@ -143,7 +143,7 @@ static USB_IRQ: AtomicU16 = AtomicU16::new(0);
 /// Whether double-buffer TX is enabled. Set once during init.
 static DOUBLE_BUFFER_TX: AtomicBool = AtomicBool::new(false);
 
-/// Count of trace IN loads that first had to flush stale words from an idle TxFIFO.
+/// Count of trace IN loads that first had to flush stale words from an idle `TxFIFO`.
 static TRACE_FIFO_RESYNCS: AtomicU32 = AtomicU32::new(0);
 
 /// Wake flag: set by ISR, polled by RTIC task.
@@ -206,7 +206,7 @@ pub fn usb_irq_enable() {
     }
 }
 
-/// Wrapper to satisfy cortex_m::interrupt::InterruptNumber trait.
+/// Wrapper to satisfy `cortex_m::interrupt::InterruptNumber` trait.
 #[derive(Clone, Copy)]
 struct IrqNr(u16);
 
@@ -738,7 +738,7 @@ pub fn usb_set_address(addr: u8) {
     cdc::notify_ep0();
 }
 
-/// Configure endpoints after SET_CONFIGURATION.
+/// Configure endpoints after `SET_CONFIGURATION`.
 pub fn usb_set_configure() {
     usb_irq_disable();
 
@@ -870,7 +870,7 @@ pub fn irq_handler() {
 
 /// USB peripheral configuration passed to `init()`.
 pub struct OtgConfig {
-    /// Base address of the USB OTG peripheral (e.g., 0x5000_0000 for OTG_FS).
+    /// Base address of the USB OTG peripheral (e.g., `0x5000_0000` for `OTG_FS`).
     pub base_addr: usize,
     /// IRQ number for the USB OTG interrupt.
     pub irq_num: u16,
@@ -939,7 +939,7 @@ pub unsafe fn init(config: &OtgConfig) {
 }
 
 /// Check if the bulk IN endpoint is configured (USBAEP bit set).
-/// Returns true after SET_CONFIGURATION has been processed.
+/// Returns true after `SET_CONFIGURATION` has been processed.
 pub fn is_bulk_in_configured() -> bool {
     let base = USB_BASE.load(Ordering::Relaxed);
     if base == 0 {
