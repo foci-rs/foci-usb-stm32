@@ -459,7 +459,7 @@ mod trace_descriptor_tests {
     use super::*;
 
     fn bytes<T>(value: &T) -> &[u8] {
-        let ptr = (value as *const T).cast::<u8>();
+        let ptr = core::ptr::from_ref::<T>(value).cast::<u8>();
         // SAFETY: `value` is valid for `size_of::<T>()` bytes and this helper
         // only reinterprets it as immutable bytes for descriptor layout tests.
         unsafe { core::slice::from_raw_parts(ptr, core::mem::size_of::<T>()) }
