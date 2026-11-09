@@ -102,7 +102,7 @@ impl<const N: usize> TxRing<N> {
             Ordering::Release,
             Ordering::Relaxed,
             |published_end| {
-                ((reserved_end.wrapping_sub(published_end) as i32) > 0).then_some(reserved_end)
+                (reserved_end.wrapping_sub(published_end).cast_signed() > 0).then_some(reserved_end)
             },
         );
     }

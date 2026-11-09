@@ -303,7 +303,7 @@ pub fn fifo_write_packet(ep: usize, src: &[u8]) -> i8 {
     writel(reg(diepctl(ep)), ctl | DEPCTL_EPENA | DEPCTL_CNAK);
 
     let mut offset = 0usize;
-    let mut count = len as i32;
+    let mut count = len.cast_signed();
     while count >= 4 {
         let mut word = [0u8; 4];
         word.copy_from_slice(&src[offset..offset + 4]);
@@ -662,7 +662,7 @@ pub fn usb_read_ep0_setup(data: &mut [u8], max_len: u8) -> i8 {
     unsafe {
         core::ptr::copy_nonoverlapping((*SETUP_BUF.get()).as_ptr(), data.as_mut_ptr(), copy_len);
     }
-    max_len as i8
+    max_len.cast_signed()
 }
 
 /// Send data on EP0 (control IN).

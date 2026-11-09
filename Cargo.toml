@@ -27,4 +27,3 @@ inline_always = "allow"
 must_use_candidate = "allow"
 similar_names = "allow"
 # Debt: lints that still fire; drop an entry once its findings are fixed.
-cast_possible_wrap = "allow"
